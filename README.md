@@ -114,6 +114,65 @@ Install in Arduino IDE:
 - EEPROM (built-in)
 
 ---
+## System Architecture
+
+The system operates as a standalone embedded IoT device.
+        WiFi
+          │
+          ▼
+  Jolpica F1 API
+  (Race Results + Next Race)
+          │
+          ▼
+     NodeMCU (ESP8266)
+          │
+          ├── JSON Parsing (ArduinoJson)
+          ├── Race State Logic
+          ├── EEPROM Persistence
+          ├── Time Sync (NTP)
+          │
+          ▼
+   WS2812B LED Strip (1m)
+
+### Data Flow
+
+1. Device connects to WiFi.
+2. Syncs time using NTP.
+3. Checks if today is a race day.
+4. If race weekend:
+   - Polls API every 2 minutes.
+   - Detects leading constructor.
+   - Updates LED strip.
+5. If race finished:
+   - Runs checkered animation.
+   - Stores winner in EEPROM.
+6. Button toggles between Live Mode and Display Mode.
+
+## Wiring Diagram
+
+### LED Strip Connections
+
+| NodeMCU Pin | LED Strip |
+|-------------|-----------|
+| D4 (GPIO2)  | DIN (via 330Ω resistor) |
+| GND         | GND |
+| External 5V | 5V |
+
+Important:
+- Use a 1000µF capacitor across 5V and GND at the LED strip.
+- The external 5V supply must share ground with the NodeMCU.
+
+---
+
+### Button Connection
+
+| Button Pin | Connection |
+|------------|------------|
+| One side   | D3 (GPIO0) |
+| Other side | GND |
+
+Button uses internal pull-up resistor.
+Pressing the button pulls the pin LOW.
 
 ## API Used
 
@@ -128,3 +187,14 @@ https://api.jolpi.ca/ergast/f1/current/last/results.json
 
 Next Race Detection:
 https://api.jolpi.ca/ergast/f1/current/next.json
+
+## Demo
+
+Live Mode:
+- Pulsing team colour during race
+- Smooth transitions on leader change
+- Checkered wipe on finish
+
+Display Mode:
+- Neutral white illumination for model showcase
+
