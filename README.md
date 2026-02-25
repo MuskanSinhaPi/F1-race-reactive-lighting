@@ -39,6 +39,24 @@ The project is fully standalone and does not require a backend server.
 | Red Bull Racing | ![#00162b](https://img.shields.io/badge/-Red_Bull-00162b?style=for-the-badge) | 
 | Williams | ![#000a20](https://img.shields.io/badge/-Williams-000a20?style=for-the-badge) | 
 
+## Team Color Reference (LED-Optimized)
+
+The following colors are tuned for emissive LED display rather than print-accurate brand hex values.  
+Dark brand colors have been adjusted to improve real-world visibility on WS2812B LEDs.
+
+| Team | LED Color | RGB Value | Notes |
+|------|-----------|-----------|-------|
+| Ferrari | ![](https://img.shields.io/badge/%20-220,20,20-DC1414?style=for-the-badge) | (220, 20, 20) | Strong saturated red |
+| Alpine | ![](https://img.shields.io/badge/%20-20,40,150-142896?style=for-the-badge) | (20, 40, 150) | Boosted deep blue |
+| Aston Martin | ![](https://img.shields.io/badge/%20-0,130,90-00825A?style=for-the-badge) | (0, 130, 90) | Brighter emerald tone |
+| Haas | ![](https://img.shields.io/badge/%20-220,0,45-DC002D?style=for-the-badge) | (220, 0, 45) | Red accent instead of black |
+| Audi | ![](https://img.shields.io/badge/%20-180,0,0-B40000?style=for-the-badge) | (180, 0, 0) | Highlight red for visibility |
+| Cadillac | ![](https://img.shields.io/badge/%20-180,180,180-B4B4B4?style=for-the-badge) | (180, 180, 180) | Soft silver |
+| McLaren | ![](https://img.shields.io/badge/%20-255,120,0-FF7800?style=for-the-badge) | (255, 120, 0) | Warm papaya orange |
+| Mercedes | ![](https://img.shields.io/badge/%20-0,255,210-00FFD2?style=for-the-badge) | (0, 255, 210) | Bright teal |
+| Racing Bulls | ![](https://img.shields.io/badge/%20-40,60,200-283CC8?style=for-the-badge) | (40, 60, 200) | Enhanced navy |
+| Red Bull Racing | ![](https://img.shields.io/badge/%20-10,60,200-0A3CC8?style=for-the-badge) | (10, 60, 200) | Deep visible blue |
+| Williams | ![](https://img.shields.io/badge/%20-20,40,180-1428B4?style=for-the-badge) | (20, 40, 180) | Rich royal blue |
 ---
 
 ## Hardware Requirements
@@ -81,4 +99,6 @@ Install in Arduino IDE:
 
 ## API Used
 
-Ergast Developer API (free, no API key required):
+https://github.com/jolpica/jolpica-f1
+(alternative to the now deprecated Ergast Developer API (free, no API key required, Ergast fork))
+hit GET request https://api.jolpi.ca/ergast/f1/current/last/results.json on postman
