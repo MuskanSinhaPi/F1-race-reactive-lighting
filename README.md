@@ -4,7 +4,7 @@
 
 This project is an IoT-based ambient display system built using a **NodeMCU (ESP8266)** and a **1-meter WS2812B NeoPixel LED strip**.
 
-The system fetches live Formula 1 race results from the Ergast API and dynamically updates LED colors to represent the leading constructor during a race.
+The system fetches live Formula 1 race results from the Jolpica (Ergast - compatible) API and dynamically renders LED team colors to represent the leading constructor during a race.
 
 At race completion, a checkered flag animation is triggered, and the winning constructor's color is stored in EEPROM so that the display persists until the next race.
 
@@ -22,6 +22,18 @@ The project is fully standalone and does not require a backend server.
 - Winner color persists using EEPROM
 - Automatic brightness adjustment based on time of day (IST)
 - Default boot state set to McLaren if EEPROM is uninitialized
+- Race weekend detection (no false triggers)
+- Physical button toggle for display mode
+- LED-optimised team colours
+
+## Display Mode
+
+A hardware push-button toggles between:
+
+- Live Race Mode (default)
+- Display Mode (neutral white illumination)
+
+Returning to Live Mode resumes race state immediately.
 
 ## Team Color Reference
 
@@ -67,6 +79,7 @@ Dark brand colors have been adjusted to improve real-world visibility on WS2812B
 - 330Ω resistor (data line protection)
 - 1000µF capacitor across 5V and GND (recommended)
 - Jumper wires
+- Push button (GPIO D3 to GND)
 
 ---
 
@@ -81,6 +94,11 @@ Dark brand colors have been adjusted to improve real-world visibility on WS2812B
 **Important:**
 - The external power supply GND must be connected to NodeMCU GND.
 - Do not power the LED strip directly from the NodeMCU 5V pin.
+## Power Considerations
+
+A 60-LED strip may draw up to 3.6A at full brightness.  
+Use an external 5V supply.  
+Common ground between NodeMCU and LED strip is mandatory.
 
 ---
 
@@ -102,3 +120,11 @@ Install in Arduino IDE:
 https://github.com/jolpica/jolpica-f1
 (alternative to the now deprecated Ergast Developer API (free, no API key required, Ergast fork))
 hit GET request https://api.jolpi.ca/ergast/f1/current/last/results.json on postman
+
+## API Endpoints Used
+
+Race Results:
+https://api.jolpi.ca/ergast/f1/current/last/results.json
+
+Next Race Detection:
+https://api.jolpi.ca/ergast/f1/current/next.json
