@@ -15,7 +15,8 @@ Expected:
 - Entire strip lights up solid red
 - No flickering
 - No dim or dead LEDs
-  
+
+```cpp
 #include <Adafruit_NeoPixel.h>
 
 #define LED_PIN D4
@@ -35,6 +36,7 @@ void setup() {
 }
 
 void loop() {}
+```
 
 If flickering occurs:
 - Ensure external 5V supply is adequate (≥4A recommended)
@@ -51,6 +53,7 @@ Ensure the push button is wired correctly and does not trigger randomly.
 Expected:
 Serial Monitor prints "Pressed" only when button is physically pressed.
 
+```cpp
 #define BUTTON_PIN D5
 
 void setup() {
@@ -64,6 +67,7 @@ void loop() {
     delay(300);
   }
 }
+```
 
 If random prints occur:
 - Check wiring orientation of 4-pin tactile switch
@@ -80,6 +84,7 @@ Expected:
 - "Connected" printed
 - Local IP address displayed
 
+```cpp
 #include <ESP8266WiFi.h>
 
 const char* ssid = "YOUR_WIFI";
@@ -99,6 +104,7 @@ void setup() {
 }
 
 void loop() {}
+```
 
 If connection fails:
 - Recheck SSID/password
@@ -115,6 +121,7 @@ Expected:
 - HTTP status code 200
 - JSON payload printed in Serial Monitor
 
+```cpp
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -147,6 +154,7 @@ void setup() {
 }
 
 void loop() {}
+```
 
 If HTTP code is:
 - -1 → SSL or connection issue
@@ -164,6 +172,7 @@ Expected:
 - Value written is correctly read back
 - Value persists after power cycle
 
+```cpp
 #include <EEPROM.h>
 
 void setup() {
@@ -179,6 +188,7 @@ void setup() {
 }
 
 void loop() {}
+```
 
 After verifying, power cycle the board and re-run read test.
 
@@ -192,6 +202,7 @@ Confirm NTP time synchronization and time-based brightness logic.
 Expected:
 - Correct hour printed in Serial Monitor
 
+```cpp
 #include <ESP8266WiFi.h>
 #include <time.h>
 
@@ -215,6 +226,7 @@ void setup() {
 }
 
 void loop() {}
+```
 
 Verify that reported hour matches local time.
 
@@ -228,6 +240,7 @@ Verify smooth fade and animation logic independently.
 Expected:
 - LED strip fades from Ferrari red to McLaren orange smoothly
 
+```cpp
 #include <Adafruit_NeoPixel.h>
 
 #define LED_PIN D4
@@ -271,6 +284,7 @@ void setup() {
 }
 
 void loop() {}
+```
 
 ---
 
