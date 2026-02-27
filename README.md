@@ -216,7 +216,8 @@ Button cycle order (13 modes, wraps back to 0):
 | 9  | Mercedes |
 | 10 | Racing Bulls |
 | 11 | Red Bull|
-| 12 | Williams | → wraps to 0Display again 
+| 12 | Williams | 
+→ wraps to 0Display again 
 
 Other changes:
 
