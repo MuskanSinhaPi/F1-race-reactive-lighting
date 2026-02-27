@@ -198,3 +198,29 @@ Live Mode:
 Display Mode:
 - Neutral white illumination for model showcase
 
+#Edit - additional functionality
+
+Button cycle order (13 modes, wraps back to 0):
+
+| PressMode  | Display |
+|-------------|-----------|
+| 0  | (warm white) |
+| 1  | Live race |
+| 2  | Ferrari|
+| 3  | Alpine|
+| 4  | Aston Martin |
+| 5  | Haas  |
+| 6  | Audi  |
+| 7  | Cadillac |
+| 8  | McLaren |
+| 9  | Mercedes |
+| 10 | Racing Bulls |
+| 11 | Red Bull|
+| 12 | Williams | → wraps to 0Display again 
+
+Other changes:
+
+- Mode saved to EEPROM slot 1 (slot 0 still holds last winner team) — survives power cuts
+- Debounce moved into button logic properly using millis() instead of delay()
+- smoothFadeToColor() extracted as a reusable function so display white also fades in smoothly
+- API polling and pulse only run when actually in MODE_LIVE — team color modes are fully static, no unnecessary network calls
