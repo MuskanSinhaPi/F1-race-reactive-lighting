@@ -174,6 +174,8 @@ Important:
 Button uses internal pull-up resistor.
 Pressing the button pulls the pin LOW.
 
+![schematic](assets/schematic.png)
+
 ## API Used
 
 https://github.com/jolpica/jolpica-f1
@@ -225,3 +227,5 @@ Other changes:
 - Debounce moved into button logic properly using millis() instead of delay()
 - smoothFadeToColor() extracted as a reusable function so display white also fades in smoothly
 - API polling and pulse only run when actually in MODE_LIVE — team color modes are fully static, no unnecessary network calls
+
+![reference table](assets/mode-reference-table.png)
