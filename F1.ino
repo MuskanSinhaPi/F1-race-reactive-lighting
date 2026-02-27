@@ -19,20 +19,8 @@ const char* password = "YOUR_PASSWORD";
 // ================= TIMING =================
 unsigned long lastCheck       = 0;
 unsigned long lastWifiCheck   = 0;
-const unsigned long interval  = 120000; // 2 min
-const unsigned long wifiRetry = 30000;  // 30 sec
-
-// ================= STATE =================
-bool raceFinished   = false;
-bool displayMode    = false;
-bool raceWeekend    = false;
-bool lastButtonState = HIGH;
-
-int  currentRound   = -1;  // track which round results we've seen
-
-// ================= COLOR TRACKING =================
-int currentR = 0, currentG = 0, currentB = 0;
-int targetR  = 0, targetG  = 0, targetB  = 0;
+const unsigned long interval  = 120000;
+const unsigned long wifiRetry = 30000;
 
 // ================= TEAM IDs =================
 #define TEAM_FERRARI       1
@@ -46,6 +34,38 @@ int targetR  = 0, targetG  = 0, targetB  = 0;
 #define TEAM_RACINGBULLS   9
 #define TEAM_REDBULL      10
 #define TEAM_WILLIAMS     11
+
+// ================= MODES =================
+// 0 = Display (white)
+// 1 = Live race
+// 2–12 = Team colors (Ferrari=2, Alpine=3 ... Williams=12)
+#define MODE_DISPLAY   0
+#define MODE_LIVE      1
+#define MODE_FERRARI   2
+#define MODE_ALPINE    3
+#define MODE_ASTON     4
+#define MODE_HAAS      5
+#define MODE_AUDI      6
+#define MODE_CADILLAC  7
+#define MODE_MCLAREN   8
+#define MODE_MERCEDES  9
+#define MODE_RBULLS   10
+#define MODE_REDBULL  11
+#define MODE_WILLIAMS 12
+#define MODE_COUNT    13  // total number of modes
+
+// ================= STATE =================
+bool raceFinished    = false;
+bool raceWeekend     = false;
+bool lastButtonState = HIGH;
+unsigned long lastDebounce = 0;
+
+int  currentMode     = MODE_LIVE;
+int  currentRound    = -1;
+
+// ================= COLOR TRACKING =================
+int currentR = 0, currentG = 0, currentB = 0;
+int targetR  = 0, targetG  = 0, targetB  = 0;
 
 // ==========================================================
 
@@ -61,10 +81,8 @@ void setup() {
   EEPROM.begin(10);
 
   connectWiFi();
+  configTime(19800, 0, "pool.ntp.org");
 
-  configTime(19800, 0, "pool.ntp.org"); // IST
-
-  // Wait for NTP sync properly
   Serial.print("Syncing time");
   time_t now = time(nullptr);
   int attempts = 0;
@@ -78,21 +96,18 @@ void setup() {
 
   detectRaceWeekend();
 
-  int savedTeam = EEPROM.read(0);
-  if (savedTeam < 1 || savedTeam > 11) {
-    savedTeam = TEAM_MCLAREN;
-    EEPROM.write(0, savedTeam);
-    EEPROM.commit();
-  }
+  // Restore last saved mode from EEPROM
+  int savedMode = EEPROM.read(1);
+  if (savedMode < 0 || savedMode >= MODE_COUNT) savedMode = MODE_LIVE;
+  currentMode = savedMode;
 
-  applyTeamColor(savedTeam);
+  applyMode(currentMode);
 }
 
 // ==========================================================
 
 void loop() {
   checkButton();
-  if (displayMode) return;
 
   // WiFi watchdog
   if (millis() - lastWifiCheck > wifiRetry) {
@@ -103,47 +118,84 @@ void loop() {
     }
   }
 
-  if (!raceWeekend) return;
-  if (raceFinished) return;
-
-  if (millis() - lastCheck > interval) {
-    lastCheck = millis();
-    fetchRaceData();
+  // Only poll API in live mode
+  if (currentMode == MODE_LIVE && raceWeekend && !raceFinished) {
+    if (millis() - lastCheck > interval) {
+      lastCheck = millis();
+      fetchRaceData();
+    }
+    pulseEffect();
+    delay(30);
   }
-
-  pulseEffect();
-  delay(30);
 }
 
 // ==========================================================
-// BUTTON
+// BUTTON — cycles through all modes
 // ==========================================================
 
 void checkButton() {
   bool currentState = digitalRead(BUTTON_PIN);
 
+  // Debounce: ignore presses within 300ms
   if (lastButtonState == HIGH && currentState == LOW) {
-    displayMode = !displayMode;
+    if (millis() - lastDebounce > 300) {
+      lastDebounce = millis();
 
-    if (displayMode) {
-      showDisplayWhite();
-    } else {
-      applyTeamColor(EEPROM.read(0));
+      currentMode = (currentMode + 1) % MODE_COUNT;
+
+      Serial.printf("Mode: %d\n", currentMode);
+
+      applyMode(currentMode);
+
+      // Save mode to EEPROM (slot 1, slot 0 reserved for last winner team)
+      EEPROM.write(1, currentMode);
+      EEPROM.commit();
     }
-
-    delay(300);
   }
 
   lastButtonState = currentState;
 }
 
 // ==========================================================
-// DISPLAY MODE
+// APPLY MODE
+// ==========================================================
+
+void applyMode(int mode) {
+  switch (mode) {
+
+    case MODE_DISPLAY:
+      showDisplayWhite();
+      break;
+
+    case MODE_LIVE:
+      // Show last known winner color and resume pulsing
+      {
+        int savedTeam = EEPROM.read(0);
+        if (savedTeam < 1 || savedTeam > 11) savedTeam = TEAM_MCLAREN;
+        applyTeamColor(savedTeam);
+      }
+      break;
+
+    case MODE_FERRARI:   applyTeamColor(TEAM_FERRARI);     break;
+    case MODE_ALPINE:    applyTeamColor(TEAM_ALPINE);      break;
+    case MODE_ASTON:     applyTeamColor(TEAM_ASTON);       break;
+    case MODE_HAAS:      applyTeamColor(TEAM_HAAS);        break;
+    case MODE_AUDI:      applyTeamColor(TEAM_AUDI);        break;
+    case MODE_CADILLAC:  applyTeamColor(TEAM_CADILLAC);    break;
+    case MODE_MCLAREN:   applyTeamColor(TEAM_MCLAREN);     break;
+    case MODE_MERCEDES:  applyTeamColor(TEAM_MERCEDES);    break;
+    case MODE_RBULLS:    applyTeamColor(TEAM_RACINGBULLS); break;
+    case MODE_REDBULL:   applyTeamColor(TEAM_REDBULL);     break;
+    case MODE_WILLIAMS:  applyTeamColor(TEAM_WILLIAMS);    break;
+  }
+}
+
+// ==========================================================
+// DISPLAY MODE (warm white)
 // ==========================================================
 
 void showDisplayWhite() {
-  for (int i = 0; i < NUM_LEDS; i++)
-    strip.setPixelColor(i, strip.Color(180, 180, 170));
+  smoothFadeToColor(180, 180, 170);
   strip.setBrightness(150);
   strip.show();
 }
@@ -190,42 +242,29 @@ void detectRaceWeekend() {
       const char* roundStr = doc["MRData"]["RaceTable"]["Races"][0]["round"];
 
       if (raceDate) {
-        // Parse race date components
         int ry, rm, rd;
         sscanf(raceDate, "%d-%d-%d", &ry, &rm, &rd);
 
-        // Build race date as time_t (midnight IST = UTC-5:30 offset already applied)
         struct tm raceTm = {};
         raceTm.tm_year = ry - 1900;
         raceTm.tm_mon  = rm - 1;
         raceTm.tm_mday = rd;
-        raceTm.tm_hour = 12; // noon on race day
+        raceTm.tm_hour = 12;
         time_t raceEpoch = mktime(&raceTm);
 
         time_t now = time(nullptr);
         double diff = difftime(raceEpoch, now);
 
-        // Active if we're within 3 days before race (Thu/Fri) through race day
-        // if (diff >= 0 && diff <= 3 * 86400) {
-        // Active if final race day (Sunday)
         if (diff >= 0 && diff <= 86400) {
           raceWeekend = true;
           if (roundStr) currentRound = atoi(roundStr);
-          Serial.printf("Race weekend active! Round %d on %s\n", currentRound, raceDate);
+          Serial.printf("Race Sunday active! Round %d on %s\n", currentRound, raceDate);
         }
       }
     }
   }
 
   https.end();
-}
-
-String getTodayDate() {
-  time_t now = time(nullptr);
-  struct tm* t = localtime(&now);
-  char buf[11];
-  sprintf(buf, "%04d-%02d-%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
-  return String(buf);
 }
 
 // ==========================================================
@@ -245,11 +284,10 @@ void fetchRaceData() {
   if (httpCode == 200) {
     String payload = https.getString();
 
-    // Filter to only what we need — avoids memory overflow on full payload
     StaticJsonDocument<128> filter;
-    filter["MRData"]["RaceTable"]["Races"][0]["round"]                                    = true;
-    filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["status"]                     = true;
-    filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["Constructor"]["name"]        = true;
+    filter["MRData"]["RaceTable"]["Races"][0]["round"]                             = true;
+    filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["status"]              = true;
+    filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["Constructor"]["name"] = true;
 
     StaticJsonDocument<512> doc;
     DeserializationError err = deserializeJson(doc, payload,
@@ -274,28 +312,29 @@ void fetchRaceData() {
 
     int resultRound = atoi(roundStr);
 
-    // Guard: only act on results from the CURRENT round
-    // (prevents last week's "Finished" from triggering on weekend start)
     if (currentRound > 0 && resultRound != currentRound) {
-      Serial.printf("Results are for round %d, waiting for round %d\n",
-                    resultRound, currentRound);
+      Serial.printf("Results for round %d, waiting for round %d\n", resultRound, currentRound);
       https.end();
       return;
     }
 
     int teamID = getTeamID(String(team));
-    applyTeamColor(teamID);
+
+    // Only update visuals if still in live mode
+    if (currentMode == MODE_LIVE) applyTeamColor(teamID);
 
     Serial.printf("P1: %s | Status: %s\n", team, status);
 
     if (String(status) == "Finished") {
       raceFinished = true;
-      checkeredWipe();
 
       EEPROM.write(0, teamID);
       EEPROM.commit();
 
-      applyTeamColor(teamID);
+      if (currentMode == MODE_LIVE) {
+        checkeredWipe();
+        applyTeamColor(teamID);
+      }
     }
   }
 
@@ -318,7 +357,7 @@ int getTeamID(String team) {
   if (team.indexOf("Racing Bulls") >= 0) return TEAM_RACINGBULLS;
   if (team.indexOf("Red Bull")     >= 0) return TEAM_REDBULL;
   if (team.indexOf("Williams")     >= 0) return TEAM_WILLIAMS;
-  return TEAM_MCLAREN; // default
+  return TEAM_MCLAREN;
 }
 
 // ==========================================================
@@ -343,7 +382,7 @@ void applyTeamColor(int teamID) {
 }
 
 // ==========================================================
-// SMOOTH FADE
+// SMOOTH FADE (to target set by setTargetColor)
 // ==========================================================
 
 void setTargetColor(int r, int g, int b) {
@@ -351,11 +390,15 @@ void setTargetColor(int r, int g, int b) {
 }
 
 void smoothFade() {
+  smoothFadeToColor(targetR, targetG, targetB);
+}
+
+void smoothFadeToColor(int tr, int tg, int tb) {
   int steps = 40;
   for (int i = 0; i <= steps; i++) {
-    int r = currentR + (targetR - currentR) * i / steps;
-    int g = currentG + (targetG - currentG) * i / steps;
-    int b = currentB + (targetB - currentB) * i / steps;
+    int r = currentR + (tr - currentR) * i / steps;
+    int g = currentG + (tg - currentG) * i / steps;
+    int b = currentB + (tb - currentB) * i / steps;
 
     for (int j = 0; j < NUM_LEDS; j++)
       strip.setPixelColor(j, strip.Color(r, g, b));
@@ -364,13 +407,13 @@ void smoothFade() {
     strip.show();
     delay(20);
   }
-  currentR = targetR;
-  currentG = targetG;
-  currentB = targetB;
+  currentR = tr;
+  currentG = tg;
+  currentB = tb;
 }
 
 // ==========================================================
-// PULSE EFFECT
+// PULSE EFFECT (live mode only)
 // ==========================================================
 
 void pulseEffect() {
@@ -415,7 +458,7 @@ void checkeredWipe() {
 }
 
 // ==========================================================
-// AUTO BRIGHTNESS (IST)
+// AUTO BRIGHTNESS
 // ==========================================================
 
 void updateBrightness() {
