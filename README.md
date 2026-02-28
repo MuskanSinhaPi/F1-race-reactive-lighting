@@ -117,22 +117,38 @@ Install in Arduino IDE:
 ## System Architecture
 
 The system operates as a standalone embedded IoT device.
-        WiFi
-          │
-          ▼
-  Jolpica F1 API
-  (Race Results + Next Race)
-          │
-          ▼
-     NodeMCU (ESP8266)
-          │
-          ├── JSON Parsing (ArduinoJson)
-          ├── Race State Logic
-          ├── EEPROM Persistence
-          ├── Time Sync (NTP)
-          │
-          ▼
-   WS2812B LED Strip (1m)
+
+WiFi
+
+│
+
+▼
+
+Jolpica F1 API
+
+(Race Results + Next Race)
+
+│
+
+▼
+
+NodeMCU (ESP8266)
+
+│
+
+├── JSON Parsing (ArduinoJson)
+
+├── Race State Logic
+
+├── EEPROM Persistence
+
+├── Time Sync (NTP)
+
+│
+
+▼
+
+WS2812B LED Strip (1m)
 
 ### Data Flow
 
@@ -159,8 +175,12 @@ The system operates as a standalone embedded IoT device.
 | External 5V | 5V |
 
 Important:
-- Use a 1000µF capacitor across 5V and GND at the LED strip.
+- Use a 1000µF capacitor across 5V and GND at the LED strip (in parallel)
+- For maximum effectiveness, the capacitor should be placed:
+        -As close as possible to the input connectors of the LED strip, and across the power rails, specifically connecting the positive terminal to the 5V+ line and the negative terminal to the Ground line.
+This placement helps neutralize "ringing" or voltage spikes that can travel down long power lines before they reach the sensitive electronics inside the pixels.
 - The external 5V supply must share ground with the NodeMCU.
+-  Don't power the NodeMCU through VIN from the same 5V supply. VIN goes through the onboard voltage regulator and can cause instability with a high-current LED strip on the same rail. Power the NodeMCU separately via USB only. The 5V from PSU should go directly to the LED strip and capacitor only — not touch the NodeMCU at all.
 
 ---
 
