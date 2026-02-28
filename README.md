@@ -150,6 +150,8 @@ NodeMCU (ESP8266)
 
 WS2812B LED Strip (1m)
 
+![system architecture](assets/system-architecture.png)
+
 ### Data Flow
 
 1. Device connects to WiFi.
