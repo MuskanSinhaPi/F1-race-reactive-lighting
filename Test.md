@@ -302,3 +302,256 @@ Once all tests pass individually:
    - System resumes correctly after power cycle.
 
 System is ready for enclosure installation once all validation steps succeed.
+
+# Firmware Test & Validation Guide
+
+This document provides structured validation tests for:
+
+- Mode cycling (13 modes)
+- Display mode behavior
+- Live mode immediate API fetch
+- Button debounce logic
+- Jolpica API integration
+
+Run these tests before final deployment.
+
+---
+
+## Test 1 — Mode Cycling (Serial Only)
+
+Purpose:
+
+Verify that:
+- Button increments mode
+- Mode wraps from 12 back to 0
+- Display mode is always index 0
+- Live mode is always index 1
+
+Expected Behavior:
+
+Each button press prints the current mode to Serial Monitor.
+
+```cpp
+#define BUTTON_PIN D5
+
+int mode = 0;
+const int TOTAL_MODES = 13;
+bool lastButtonState = HIGH;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  printMode();
+}
+
+void loop() {
+  bool currentState = digitalRead(BUTTON_PIN);
+
+  if (lastButtonState == HIGH && currentState == LOW) {
+    mode++;
+    if (mode >= TOTAL_MODES) mode = 0;
+    printMode();
+    delay(300);
+  }
+
+  lastButtonState = currentState;
+}
+
+void printMode() {
+  Serial.print("Mode: ");
+  Serial.println(mode);
+}
+```
+
+Expected Serial Output:
+
+Mode: 0  
+Mode: 1  
+Mode: 2  
+...  
+Mode: 12  
+Mode: 0  
+
+---
+
+## Test 2 — Live Mode Immediate Fetch
+
+Purpose:
+
+Verify that entering Mode 1 immediately triggers API fetch.
+
+Expected Behavior:
+
+When mode changes to 1:
+- API is called immediately
+- Leader and status printed to Serial
+
+```cpp
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+
+#define BUTTON_PIN D5
+
+const char* ssid = "YOUR_WIFI";
+const char* password = "YOUR_PASSWORD";
+
+int mode = 0;
+const int TOTAL_MODES = 13;
+bool lastButtonState = HIGH;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+  printMode();
+}
+
+void loop() {
+  bool currentState = digitalRead(BUTTON_PIN);
+
+  if (lastButtonState == HIGH && currentState == LOW) {
+    mode++;
+    if (mode >= TOTAL_MODES) mode = 0;
+
+    printMode();
+
+    if (mode == 1) {
+      fetchLiveResults();
+    }
+
+    delay(300);
+  }
+
+  lastButtonState = currentState;
+}
+
+void printMode() {
+  Serial.print("Mode: ");
+  Serial.println(mode);
+}
+
+void fetchLiveResults() {
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient https;
+  https.begin(client, "https://api.jolpi.ca/ergast/f1/current/last/results.json");
+
+  int httpCode = https.GET();
+  Serial.print("HTTP Code: ");
+  Serial.println(httpCode);
+
+  if (httpCode == 200) {
+    String payload = https.getString();
+    StaticJsonDocument<4096> doc;
+
+    if (!deserializeJson(doc, payload)) {
+      const char* status =
+        doc["MRData"]["RaceTable"]["Races"][0]["Results"][0]["status"];
+
+      const char* team =
+        doc["MRData"]["RaceTable"]["Races"][0]["Results"][0]["Constructor"]["name"];
+
+      Serial.print("Leader: ");
+      Serial.println(team);
+
+      Serial.print("Status: ");
+      Serial.println(status);
+    }
+  }
+
+  https.end();
+}
+```
+
+Expected Serial Output When Entering Mode 1:
+
+Mode: 1  
+HTTP Code: 200  
+Leader: McLaren  
+Status: Finished  
+
+---
+
+## Test 3 — Button Stability Test
+
+Purpose:
+
+Ensure button does not double-trigger and debounce works correctly.
+
+Expected Behavior:
+
+Each physical press increments exactly once.
+
+```cpp
+#define BUTTON_PIN D5
+
+bool lastButtonState = HIGH;
+int pressCount = 0;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+}
+
+void loop() {
+
+  bool currentState = digitalRead(BUTTON_PIN);
+
+  if (lastButtonState == HIGH && currentState == LOW) {
+    pressCount++;
+    Serial.print("Press Count: ");
+    Serial.println(pressCount);
+    delay(300);
+  }
+
+  lastButtonState = currentState;
+}
+```
+
+If multiple increments occur per press:
+
+- Increase debounce delay
+- Check wiring
+- Verify button orientation
+
+---
+
+## Test 4 — Full Mode Architecture Validation
+
+Purpose:
+
+Verify correct behavior sequence:
+
+- Mode 0 → Display
+- Mode 1 → Live + immediate fetch
+- Mode 2–12 → Manual override
+- Wrap back to 0
+
+Validation Checklist:
+
+- Button cycles through all 13 modes
+- Mode 1 triggers immediate fetch
+- No skipped modes
+- No double triggers
+- Wrap works correctly
+
+---
+
+## Final Deployment Validation
+
+Before installing permanently:
+
+- Confirm WiFi connects reliably
+- Confirm HTTPS returns 200
+- Confirm JSON parses correctly
+- Confirm button stable
+- Confirm no memory crashes
+- Confirm mode 1 fetches immediately
+- Confirm wrap-around behavior
+
+System is ready for production firmware once all tests pass.
