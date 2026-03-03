@@ -6,7 +6,7 @@
 #include <EEPROM.h>
 #include <time.h>
 
-#define LED_PIN     D4
+#define LED_PIN     D2
 #define BUTTON_PIN  D3
 #define NUM_LEDS    60
 
