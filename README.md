@@ -23,7 +23,7 @@ The project is fully standalone and does not require a backend server.
 - Automatic brightness adjustment based on time of day (IST)
 - Default boot state set to McLaren if EEPROM is uninitialized
 - Race weekend detection (no false triggers)
-- Physical button toggle for display mode
+- Physical button toggle for display mode (check in pace for debounce)
 - LED-optimised team colours
 - WiFi reconnection: Checks every 30 seconds and reconnects if dropped
 
