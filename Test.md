@@ -541,6 +541,240 @@ Validation Checklist:
 - Wrap works correctly
 
 ---
+# Nano Diagnostic Tests
+
+## Test 1 – Fade Verification
+
+Upload to Nano to validate smooth fades before connecting NodeMCU.
+
+```cpp
+#include <Adafruit_NeoPixel.h>
+
+#define STRIP_PIN  6
+#define NUM_LEDS  60
+
+Adafruit_NeoPixel strip(NUM_LEDS, STRIP_PIN, NEO_GRB + NEO_KHZ800);
+
+int currentR = 0, currentG = 0, currentB = 0;
+
+void setup() {
+  Serial.begin(115200);
+  strip.begin();
+  strip.setBrightness(120);
+  strip.show();
+  Serial.println("Fade test starting...");
+}
+
+void loop() {
+  Serial.println("→ McLaren (orange)");
+  smoothFade(255, 120, 0);
+  delay(2000);
+
+  Serial.println("→ Mercedes (teal)");
+  smoothFade(0, 255, 210);
+  delay(2000);
+
+  Serial.println("→ Ferrari (red)");
+  smoothFade(220, 20, 20);
+  delay(2000);
+
+  Serial.println("→ Red Bull (blue)");
+  smoothFade(10, 60, 200);
+  delay(2000);
+
+  Serial.println("→ Display white");
+  smoothFade(180, 180, 170);
+  delay(2000);
+}
+
+void smoothFade(int tr, int tg, int tb) {
+  int steps = 40;
+  for (int i = 0; i <= steps; i++) {
+    int r = currentR + (tr - currentR) * i / steps;
+    int g = currentG + (tg - currentG) * i / steps;
+    int b = currentB + (tb - currentB) * i / steps;
+    for (int j = 0; j < NUM_LEDS; j++)
+      strip.setPixelColor(j, strip.Color(r, g, b));
+    strip.show();
+    delay(20);
+  }
+  currentR = tr;
+  currentG = tg;
+  currentB = tb;
+  Serial.println("Fade done");
+}
+```
+
+Confirm:
+- Smooth transitions
+- No flicker
+- No brownouts
+
+---
+
+## Test 2 – Manual Mode Testing
+
+Upload Serial-controlled test to Nano.
+
+```cpp
+#include <Adafruit_NeoPixel.h>
+
+#define STRIP_PIN  6
+#define NUM_LEDS  60
+
+Adafruit_NeoPixel strip(NUM_LEDS, STRIP_PIN, NEO_GRB + NEO_KHZ800);
+
+int currentR = 0, currentG = 0, currentB = 0;
+bool pulsing      = false;
+float pulseFactor = 0.3;
+bool pulseRising  = true;
+int pulseR = 0, pulseG = 0, pulseB = 0;
+unsigned long lastPulse = 0;
+
+struct Color { int r, g, b; };
+Color teamColors[] = {
+  {  0,   0,   0},  // 0 unused
+  {220,  20,  20},  // 1  Ferrari
+  { 20,  40, 150},  // 2  Alpine
+  {  0, 130,  90},  // 3  Aston
+  {220,   0,  45},  // 4  Haas
+  {180,   0,   0},  // 5  Audi
+  {180, 180, 180},  // 6  Cadillac
+  {255, 120,   0},  // 7  McLaren
+  {  0, 255, 210},  // 8  Mercedes
+  { 40,  60, 200},  // 9  Racing Bulls
+  { 10,  60, 200},  // 10 Red Bull
+  { 20,  40, 180},  // 11 Williams
+};
+
+void setup() {
+  Serial.begin(115200);
+  strip.begin();
+  strip.setBrightness(120);
+  strip.show();
+
+  Serial.println("=== MODE TEST ===");
+  Serial.println("Send a number:");
+  Serial.println("  0  = Display white");
+  Serial.println("  1  = Ferrari");
+  Serial.println("  2  = Alpine");
+  Serial.println("  3  = Aston Martin");
+  Serial.println("  4  = Haas");
+  Serial.println("  5  = Audi");
+  Serial.println("  6  = Cadillac");
+  Serial.println("  7  = McLaren");
+  Serial.println("  8  = Mercedes");
+  Serial.println("  9  = Racing Bulls");
+  Serial.println("  10 = Red Bull");
+  Serial.println("  11 = Williams");
+  Serial.println("  99 = Checkered wipe");
+  Serial.println("  255 = Pulse current color");
+}
+
+void loop() {
+  // Serial input
+  if (Serial.available()) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+    int cmd = input.toInt();
+    Serial.printf("Command: %d\n", cmd);
+    handleCommand(cmd);
+  }
+
+  // Pulse
+  if (pulsing && millis() - lastPulse > 30) {
+    lastPulse = millis();
+    doPulse();
+  }
+}
+
+void handleCommand(int cmd) {
+  if (cmd == 0) {
+    pulsing = false;
+    smoothFade(180, 180, 170);
+    strip.setBrightness(150);
+    strip.show();
+    Serial.println("Display white");
+
+  } else if (cmd >= 1 && cmd <= 11) {
+    pulsing = false;
+    Color c = teamColors[cmd];
+    smoothFade(c.r, c.g, c.b);
+    pulseR = c.r; pulseG = c.g; pulseB = c.b;
+
+  } else if (cmd == 99) {
+    pulsing = false;
+    Serial.println("Checkered wipe");
+    checkeredWipe();
+    Serial.println("Wipe done");
+
+  } else if (cmd == 255) {
+    pulsing = true;
+    Serial.println("Pulsing started");
+
+  } else {
+    Serial.println("Unknown command");
+  }
+}
+
+void smoothFade(int tr, int tg, int tb) {
+  int steps = 40;
+  for (int i = 0; i <= steps; i++) {
+    int r = currentR + (tr - currentR) * i / steps;
+    int g = currentG + (tg - currentG) * i / steps;
+    int b = currentB + (tb - currentB) * i / steps;
+    for (int j = 0; j < NUM_LEDS; j++)
+      strip.setPixelColor(j, strip.Color(r, g, b));
+    strip.show();
+    delay(20);
+  }
+  currentR = tr;
+  currentG = tg;
+  currentB = tb;
+}
+
+void doPulse() {
+  if (pulseRising) {
+    pulseFactor += 0.01;
+    if (pulseFactor >= 1.0) pulseRising = false;
+  } else {
+    pulseFactor -= 0.01;
+    if (pulseFactor <= 0.3) pulseRising = true;
+  }
+  for (int i = 0; i < NUM_LEDS; i++)
+    strip.setPixelColor(i, strip.Color(
+      pulseR * pulseFactor,
+      pulseG * pulseFactor,
+      pulseB * pulseFactor));
+  strip.show();
+}
+
+void checkeredWipe() {
+  for (int c = 0; c < 15; c++) {
+    for (int offset = 0; offset < 8; offset++) {
+      for (int i = 0; i < NUM_LEDS; i++) {
+        int pattern = ((i + offset) / 4) % 2;
+        strip.setPixelColor(i, pattern == 0
+          ? strip.Color(240, 240, 240)
+          : strip.Color( 30,  30,  30));
+      }
+      strip.show();
+      delay(80);
+    }
+  }
+}
+```
+
+Send:
+
+- 7 → McLaren
+- 255 → Pulse
+- 1 → Ferrari
+- 99 → Checkered
+- 0 → Display white
+
+Verify smooth operation across all colors.
+------
 
 ## Final Deployment Validation
 
