@@ -59,8 +59,9 @@ void setup() {
 
 // ==========================================================
 
-void loop() {
+  void loop() {
 
+  // From ESP8266
   if (espSerial.available()) {
     String msg = espSerial.readStringUntil('\n');
     msg.trim();
@@ -68,6 +69,19 @@ void loop() {
 
     int cmd = msg.toInt();
     Serial.print("Command Received: ");
+    Serial.println(cmd);
+
+    handleCommand(cmd);
+  }
+
+  // From USB Serial Monitor
+  if (Serial.available()) {
+    String msg = Serial.readStringUntil('\n');
+    msg.trim();
+    if (msg.length() == 0) return;
+
+    int cmd = msg.toInt();
+    Serial.print("USB Test Command: ");
     Serial.println(cmd);
 
     handleCommand(cmd);
