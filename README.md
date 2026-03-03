@@ -221,39 +221,6 @@ The correct solution is architectural separation:
 
 ---
 
-# Diagnostic Tests
-
-## Test 1 – Fade Verification
-
-Upload to Nano to validate smooth fades before connecting NodeMCU.
-
-```cpp
-// Fade test code here
-```
-
-Confirm:
-- Smooth transitions
-- No flicker
-- No brownouts
-
----
-
-## Test 2 – Manual Mode Testing
-
-Upload Serial-controlled test to Nano.
-
-Send:
-
-- 7 → McLaren
-- 255 → Pulse
-- 1 → Ferrari
-- 99 → Checkered
-- 0 → Display white
-
-Verify smooth operation across all colors.
-
----
-
 # Production Deployment Checklist
 
 ## Firmware
