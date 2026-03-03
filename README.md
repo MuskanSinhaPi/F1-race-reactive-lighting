@@ -2,397 +2,306 @@
 
 ## Overview
 
-This project is an IoT-based ambient display system built using a **NodeMCU (ESP8266)** and a **1-meter WS2812B NeoPixel LED strip**.
+This project is a standalone embedded IoT ambient display system that visualizes live Formula 1 race leadership using a WS2812B LED strip.
 
-The system fetches live Formula 1 race results from the Jolpica (Ergast - compatible) API and dynamically renders LED team colors to represent the leading constructor during a race.
+The system uses:
 
-At race completion, a checkered flag animation is triggered, and the winning constructor's color is stored in EEPROM so that the display persists until the next race.
+- **NodeMCU (ESP8266)** — WiFi + API + race logic
+- **Arduino Nano** — deterministic LED control
+- **WS2812B NeoPixel strip (1m)** — visual output
 
-The project is fully standalone and does not require a backend server.
+During a race:
+- The leading constructor’s color is displayed.
+- Smooth fade transitions occur when P1 changes.
+- A pulse effect runs while race is live.
+- A lights-out countdown animation runs before start.
+- A checkered wipe plays when race finishes.
+- Winner is saved to EEPROM and persists after power loss.
+
+No backend server is required.
 
 ---
 
-## Features
+# System Architecture
 
-- Fetches live race results from Ergast F1 API
-- Displays leading constructor color during race
-- Smooth fade transitions between teams
-- Subtle pulse animation while race is live
-- Checkered flag wipe animation on race completion
-- Winner color persists using EEPROM
-- Automatic brightness adjustment based on time of day (IST)
-- Default boot state set to McLaren if EEPROM is uninitialized
-- Race weekend detection (no false triggers)
-- Physical button toggle for display mode (check in pace for debounce)
-- LED-optimised team colours
-- WiFi reconnection: Checks every 30 seconds and reconnects if dropped
+The final production architecture separates networking from LED timing.
 
-## Display Mode
+```
+WiFi
+  │
+  ▼
+Jolpica F1 API
+  │
+  ▼
+NodeMCU (ESP8266)
+  ├── WiFi + HTTPS
+  ├── JSON parsing
+  ├── Race logic
+  ├── EEPROM (winner + mode)
+  └── Serial commands
+        │
+        ▼
+Arduino Nano
+  ├── Smooth fade
+  ├── Pulse engine
+  ├── Checkered animation
+  ├── Lights-out animation
+  └── Accent rendering
+        │
+        ▼
+WS2812B LED Strip
+```
 
-A hardware push-button toggles between:
+This design avoids 3.3V logic-level instability by letting the **Nano drive the strip directly at 5V logic**.
 
-- Live Race Mode (default)
-- Display Mode (neutral white illumination)
-
-Returning to Live Mode resumes race state immediately.
-
-## Team Color Reference
-
-| Team | Primary Color | 
-|------|---------------|
-| Ferrari | ![#da291c](https://img.shields.io/badge/-Ferrari-da291c?style=for-the-badge) |
-| Alpine | ![#061a4d](https://img.shields.io/badge/-Alpine-061a4d?style=for-the-badge) | 
-| Aston Martin | ![#00665e](https://img.shields.io/badge/-Aston_Martin-00665e?style=for-the-badge) | 
-| Haas | ![#e6002d](https://img.shields.io/badge/-Haas-e6002d?style=for-the-badge) | 
-| Audi | ![#101319](https://img.shields.io/badge/-Audi-101319?style=for-the-badge) | 
-| Cadillac | ![#ffffff](https://img.shields.io/badge/-Cadillac-ffffff?style=for-the-badge&logoColor=black) | 
-| McLaren | ![#ff8000](https://img.shields.io/badge/-McLaren-ff8000?style=for-the-badge) | 
-| Mercedes | ![#00f5d0](https://img.shields.io/badge/-Mercedes-00f5d0?style=for-the-badge) | 
-| Racing Bulls | ![#070b36](https://img.shields.io/badge/-Racing_Bulls-070b36?style=for-the-badge) | 
-| Red Bull Racing | ![#00162b](https://img.shields.io/badge/-Red_Bull-00162b?style=for-the-badge) | 
-| Williams | ![#000a20](https://img.shields.io/badge/-Williams-000a20?style=for-the-badge) | 
-
-## Team Color Reference (LED-Optimized)
-
-The following colors are tuned for emissive LED display rather than print-accurate brand hex values.  
-Dark brand colors have been adjusted to improve real-world visibility on WS2812B LEDs.
-
-| Team | LED Color | RGB Value | Notes |
-|------|-----------|-----------|-------|
-| Ferrari | ![](https://img.shields.io/badge/%20-220,20,20-DC1414?style=for-the-badge) | (220, 20, 20) | Strong saturated red |
-| Alpine | ![](https://img.shields.io/badge/%20-20,40,150-142896?style=for-the-badge) | (20, 40, 150) | Boosted deep blue |
-| Aston Martin | ![](https://img.shields.io/badge/%20-0,130,90-00825A?style=for-the-badge) | (0, 130, 90) | Brighter emerald tone |
-| Haas | ![](https://img.shields.io/badge/%20-220,0,45-DC002D?style=for-the-badge) | (220, 0, 45) | Red accent instead of black |
-| Audi | ![](https://img.shields.io/badge/%20-180,0,0-B40000?style=for-the-badge) | (180, 0, 0) | Highlight red for visibility |
-| Cadillac | ![](https://img.shields.io/badge/%20-180,180,180-B4B4B4?style=for-the-badge) | (180, 180, 180) | Soft silver |
-| McLaren | ![](https://img.shields.io/badge/%20-255,120,0-FF7800?style=for-the-badge) | (255, 120, 0) | Warm papaya orange |
-| Mercedes | ![](https://img.shields.io/badge/%20-0,255,210-00FFD2?style=for-the-badge) | (0, 255, 210) | Bright teal |
-| Racing Bulls | ![](https://img.shields.io/badge/%20-40,60,200-283CC8?style=for-the-badge) | (40, 60, 200) | Enhanced navy |
-| Red Bull Racing | ![](https://img.shields.io/badge/%20-10,60,200-0A3CC8?style=for-the-badge) | (10, 60, 200) | Deep visible blue |
-| Williams | ![](https://img.shields.io/badge/%20-20,40,180-1428B4?style=for-the-badge) | (20, 40, 180) | Rich royal blue |
 ---
 
-## Hardware Requirements
+# Features
+
+- Live race leader display
+- Sunday-only race detection
+- Smooth fade between constructors
+- Pulse while race status = LIVE
+- Lights-out red countdown animation
+- Checkered wipe on race completion
+- EEPROM persistence (winner + mode)
+- 13-mode manual override system
+- Button debounce using `millis()`
+- Automatic WiFi reconnection
+- LED-optimized team colors
+- Power-safe white levels
+- Accent rendering for Haas, Cadillac, Red Bull
+
+---
+
+# Button Mode Cycle (13 Modes)
+
+| PressMode | Function |
+|-----------|----------|
+| 0 | Display mode (warm white) |
+| 1 | Live race mode |
+| 2 | Ferrari |
+| 3 | Alpine |
+| 4 | Aston Martin |
+| 5 | Haas |
+| 6 | Audi |
+| 7 | Cadillac |
+| 8 | McLaren |
+| 9 | Mercedes |
+| 10 | Racing Bulls |
+| 11 | Red Bull |
+| 12 | Williams |
+| → | Wraps back to 0 |
+
+- Mode is stored in EEPROM slot 1.
+- Last race winner stored in EEPROM slot 0.
+
+---
+
+# LED-Optimized Team Colors
+
+| Team | RGB | Notes |
+|------|-----|-------|
+| Ferrari | (220, 0, 0) | Saturated red |
+| Alpine | (0, 90, 255) | Bright blue |
+| Aston Martin | (0, 100, 60) | Racing green |
+| Haas | (180, 180, 180) | Soft white + red accents |
+| Audi | (160, 0, 0) | Deep red |
+| Cadillac | (200, 200, 210) | Silver + blue accents |
+| McLaren | (255, 95, 0) | Papaya orange |
+| Mercedes | (0, 210, 170) | Teal |
+| Racing Bulls | (0, 70, 200) | Bright blue |
+| Red Bull | (0, 20, 120) | Navy + red accents |
+| Williams | (0, 140, 255) | Royal blue |
+
+White-based teams use reduced intensity to prevent excessive current draw.
+
+---
+
+# Hardware Requirements
 
 - NodeMCU (ESP8266)
-- 1m WS2812B LED strip (60 LEDs recommended)
-- External 5V power supply (minimum 4A recommended)
-- 330Ω resistor (data line protection)
-- 1000µF capacitor across 5V and GND (recommended)
-- Jumper wires
-- Push button (GPIO D3 to GND)
+- Arduino Nano
+- WS2812B LED strip (60–300 LEDs supported)
+- 5V regulated power supply (≥ 4A for 60 LEDs)
+- 330Ω resistor (data line)
+- 1000µF capacitor across 5V & GND
+- Push button
+- 1kΩ resistor (NodeMCU → Nano RX protection)
 
 ---
 
-## Wiring
+# Wiring
 
-| NodeMCU Pin | LED Strip |
-|-------------|-----------|
-| D2 (GPIO4)  | DIN (via 330Ω resistor) |
-| GND         | GND |
-| External 5V | 5V |
+## NodeMCU → Nano (Serial)
 
-**Important:**
-- The external power supply GND must be connected to NodeMCU GND.
-- Do not power the LED strip directly from the NodeMCU 5V pin.
-## Power Considerations
+```
+NodeMCU D8 → 1kΩ → Nano D8
+NodeMCU GND → Nano GND
+```
 
-A 60-LED strip may draw up to 3.6A at full brightness.  
-Use an external 5V supply.  
-Common ground between NodeMCU and LED strip is mandatory.
+## Nano → LED Strip
 
----
-
-## Software Requirements
-
-Install in Arduino IDE:
-
-- ESP8266 Board Package
-- ESP8266WiFi
-- ESP8266HTTPClient
-- ArduinoJson
-- Adafruit NeoPixel
-- EEPROM (built-in)
-
----
-## System Architecture
-
-The system operates as a standalone embedded IoT device.
-
-WiFi
-
-│
-
-▼
-
-Jolpica F1 API
-
-(Race Results + Next Race)
-
-│
-
-▼
-
-NodeMCU (ESP8266)
-
-│
-
-├── JSON Parsing (ArduinoJson)
-
-├── Race State Logic
-
-├── EEPROM Persistence
-
-├── Time Sync (NTP)
-
-│
-
-▼
-
-WS2812B LED Strip (1m)
-
-![system architecture](assets/system-architecture.png)
-
-### Data Flow
-
-1. Device connects to WiFi.
-2. Syncs time using NTP.
-3. Checks if today is a race day.
-4. If race weekend:
-   - Polls API every 2 minutes.
-   - Detects leading constructor.
-   - Updates LED strip.
-5. If race finished:
-   - Runs checkered animation.
-   - Stores winner in EEPROM.
-6. Button toggles between Live Mode and Display Mode.
-
-## Wiring Diagram
-
-### LED Strip Connections
-
-| NodeMCU Pin | LED Strip |
-|-------------|-----------|
-| D4 (GPIO2)  | DIN (via 330Ω resistor) |
-| GND         | GND |
-| External 5V | 5V |
+```
+Nano D6 → 330Ω → Strip DIN
+Nano 5V → Strip 5V (or external PSU)
+Strip GND → Nano GND
+```
 
 Important:
-- Use a 1000µF capacitor across 5V and GND at the LED strip (in parallel)
-- For maximum effectiveness, the capacitor should be placed:
-        -As close as possible to the input connectors of the LED strip, and across the power rails, specifically connecting the positive terminal to the 5V+ line and the negative terminal to the Ground line.
-This placement helps neutralize "ringing" or voltage spikes that can travel down long power lines before they reach the sensitive electronics inside the pixels.
-- The external 5V supply must share ground with the NodeMCU.
--  Don't power the NodeMCU through VIN from the same 5V supply. VIN goes through the onboard voltage regulator and can cause instability with a high-current LED strip on the same rail. Power the NodeMCU separately via USB only. The 5V from PSU should go directly to the LED strip and capacitor only — not touch the NodeMCU at all.
--  Hardware watchdog timer: the ESP8266 has a built-in software watchdog that resets the chip if loop() stops running. The built-in watchdog is usually sufficient for a project like this. The only risky blocking section is smoothFade() which takes about 800ms — well within any watchdog timeout set.
+- All grounds must be common.
+- Do NOT power Nano through VIN from LED PSU.
+- Power Nano via USB separately.
+- PSU 5V should feed LED strip directly.
 
 ---
 
-### Button Connection
+# Serial Protocol
 
-| Button Pin | Connection |
-|------------|------------|
-| One side   | D3 (GPIO0) |
-| Other side | GND |
+| Value | Meaning |
+|-------|---------|
+| 0 | Display mode |
+| 1–11 | Team ID |
+| 255 | Pulse |
+| 99 | Checkered |
+| 77 | Lights out |
 
-Button uses internal pull-up resistor.
-Pressing the button pulls the pin LOW.
+---
 
-![schematic](assets/schematic.png)
+# API Used
 
-## API Used
+Jolpica (Ergast-compatible fork):
 
-https://github.com/jolpica/jolpica-f1
-(alternative to the now deprecated Ergast Developer API (free, no API key required, Ergast fork))
-hit GET request https://api.jolpi.ca/ergast/f1/current/last/results.json on postman
-
-## API Endpoints Used
-
-Race Results:
+Race results:
+```
 https://api.jolpi.ca/ergast/f1/current/last/results.json
+```
 
-Next Race Detection:
+Next race:
+```
 https://api.jolpi.ca/ergast/f1/current/next.json
+```
 
-## Demo
+No API key required.
 
-Live Mode:
-- Pulsing team colour during race
-- Smooth transitions on leader change
-- Checkered wipe on finish
+---
 
-Display Mode:
-- Neutral white illumination for model showcase
+# Troubleshooting
 
-#Edit - additional functionality
+## Symptom: Only First LED Turns On (NodeMCU Direct Drive)
 
-Button cycle order (13 modes, wraps back to 0):
+Cause: Logic-level mismatch.
 
-| PressMode  | Display |
-|-------------|-----------|
-| 0  | (warm white) |
-| 1  | Live race |
-| 2  | Ferrari|
-| 3  | Alpine|
-| 4  | Aston Martin |
-| 5  | Haas  |
-| 6  | Audi  |
-| 7  | Cadillac |
-| 8  | McLaren |
-| 9  | Mercedes |
-| 10 | Racing Bulls |
-| 11 | Red Bull|
-| 12 | Williams | 
-→ wraps to 0Display again 
+- ESP8266 outputs 3.3V logic
+- WS2812 powered at 5V
+- Required HIGH ≈ 3.5V+
 
-Other changes:
+3.3V becomes borderline.
 
-- Mode saved to EEPROM slot 1 (slot 0 still holds last winner team) — survives power cuts
-- Debounce moved into button logic properly using millis() instead of delay()
-- smoothFadeToColor() extracted as a reusable function so display white also fades in smoothly
-- API polling and pulse only run when actually in MODE_LIVE — team color modes are fully static, no unnecessary network calls
+When powered from stable 5V supply, failure becomes more obvious.
 
-![reference table](assets/mode-reference-table.png)
+### Why Nano Pass-Through Does Not Work
+
+WS2812 uses 800kHz protocol:
+
+- 0 bit ≈ 0.35µs
+- 1 bit ≈ 0.7µs
+
+Arduino `digitalRead()` cannot mirror this.
+
+This will NOT work:
+
+```cpp
+digitalWrite(6, digitalRead(2));
+```
+
+The correct solution is architectural separation:
+- NodeMCU handles networking
+- Nano handles LED timing
+
+---
+
+# Diagnostic Tests
+
+## Test 1 – Fade Verification
+
+Upload to Nano to validate smooth fades before connecting NodeMCU.
+
+```cpp
+// Fade test code here
+```
+
+Confirm:
+- Smooth transitions
+- No flicker
+- No brownouts
+
+---
+
+## Test 2 – Manual Mode Testing
+
+Upload Serial-controlled test to Nano.
+
+Send:
+
+- 7 → McLaren
+- 255 → Pulse
+- 1 → Ferrari
+- 99 → Checkered
+- 0 → Display white
+
+Verify smooth operation across all colors.
+
+---
 
 # Production Deployment Checklist
 
-This checklist ensures the F1 Live Race Reactive LED Display system is ready for permanent installation and reliable operation.
+## Firmware
 
-Complete all sections before enclosure assembly.
+- [ ] Button cycles 0–12 correctly
+- [ ] Live mode fetches immediately
+- [ ] Leader change triggers fade
+- [ ] Race finish triggers checkered
+- [ ] Winner stored to EEPROM
 
----
+## API
 
-# 1. Firmware Validation
+- [ ] HTTPS returns 200
+- [ ] JSON parses cleanly
+- [ ] No crashes on network failure
 
-## Mode System
+## Electrical
 
-- [ ] Button cycles through all 13 modes
-- [ ] Mode 0 = Display Mode
-- [ ] Mode 1 = Live Mode
-- [ ] Modes 2–12 = Manual Team Override
-- [ ] Mode wraps from 12 → 0 correctly
-- [ ] No skipped or duplicated modes
-- [ ] No double-trigger per button press
+- [ ] 5V supply ≥ 4A
+- [ ] 330Ω data resistor installed
+- [ ] 1000µF capacitor installed
+- [ ] Common ground confirmed
 
-## Live Mode Behavior
+## Stability
 
-- [ ] Entering Mode 1 triggers immediate API fetch
-- [ ] Leader name prints correctly in Serial Monitor
-- [ ] Race status prints correctly
-- [ ] Live mode polling occurs every 2 minutes
-- [ ] Pulse effect runs only in Live Mode
-- [ ] Checkered wipe triggers when status = "Finished"
+- [ ] 30-minute runtime stable
+- [ ] No resets
+- [ ] No flicker
+- [ ] No WiFi drops
 
-## EEPROM Persistence
+## Enclosure
 
-- [ ] Winner stored after race completion
-- [ ] Power cycle restores stored winner
-- [ ] No corrupted EEPROM values
-
----
-
-# 2. API & Network Validation
-
-## WiFi
-
-- [ ] Device connects reliably on boot
-- [ ] No infinite reconnect loops
-- [ ] IP address prints in Serial
-
-## Jolpica API
-
-- [ ] HTTPS returns HTTP 200
-- [ ] JSON parses without error
-- [ ] Leader constructor name is correct
-- [ ] No crashes during API failure
-- [ ] Handles non-race days gracefully
+- [ ] Ventilation adequate
+- [ ] Wiring secured
+- [ ] Button stable
+- [ ] Final power test completed
 
 ---
 
-# 3. Electrical Validation
+# Long-Term Reliability
 
-## Power Supply
-
-- [ ] 5V regulated external supply used
-- [ ] Minimum 4A rating for 60 LEDs
-- [ ] No voltage drop under load
-- [ ] No flickering at full brightness
-
-## Wiring
-
-- [ ] Common ground between NodeMCU and LED strip
-- [ ] 330Ω resistor on data line
-- [ ] 1000µF capacitor across 5V and GND
-- [ ] Secure solder joints (no loose Dupont wires)
-
-## Button
-
-- [ ] Button wired to D5 and GND
-- [ ] Uses INPUT_PULLUP
-- [ ] Stable debounce
-- [ ] Does not affect boot mode
+- Avoid unregulated adapters
+- Keep firmware backed up
+- Monitor API changes
+- Reboot once per race weekend if desired
 
 ---
 
-# 4. Thermal & Stability Testing
+# Project Status
 
-Run for minimum 30–60 minutes.
-
-- [ ] No random resets
-- [ ] No LED flickering
-- [ ] No WiFi dropouts
-- [ ] No memory crashes
-- [ ] No unexpected mode changes
-- [ ] Board temperature within safe range
-
-Optional:
-
-- [ ] Monitor heap memory using `ESP.getFreeHeap()`
-- [ ] Confirm stable memory after repeated API calls
-
----
-
-# 5. Brightness & Visual Calibration
-
-- [ ] Day brightness acceptable
-- [ ] Night brightness not overpowering
-- [ ] Manual team colors visibly distinct
-- [ ] White display mode evenly illuminates models
-- [ ] Checkered animation clearly visible
-
----
-
-# 6. Enclosure Installation Checklist
-
-Before sealing enclosure:
-
-- [ ] Confirm WiFi signal strength inside enclosure
-- [ ] Ensure adequate ventilation
-- [ ] Secure LED strip firmly around frame
-- [ ] Strain relief on power cables
-- [ ] Button accessible and mechanically stable
-- [ ] No exposed power terminals
-
-After enclosure:
-
-- [ ] Final power-on test
-- [ ] Confirm all modes still functional
-- [ ] Confirm API fetch still works
-
----
-
-# 7. Long-Term Reliability Recommendations
-
-- Avoid powering from USB for permanent use
-- Avoid cheap unregulated adapters
-- Reboot device once per race weekend if desired
-- Keep firmware backed up in repository
-- Keep API endpoint documented in README
-
----
-
-# Production Status
-
-When all boxes are checked:
-
-System is ready for permanent deployment.
+When all checklist items are validated, the system is ready for permanent installation.
