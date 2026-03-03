@@ -25,6 +25,7 @@ The project is fully standalone and does not require a backend server.
 - Race weekend detection (no false triggers)
 - Physical button toggle for display mode
 - LED-optimised team colours
+- WiFi reconnection: Checks every 30 seconds and reconnects if dropped
 
 ## Display Mode
 
@@ -183,6 +184,7 @@ Important:
 This placement helps neutralize "ringing" or voltage spikes that can travel down long power lines before they reach the sensitive electronics inside the pixels.
 - The external 5V supply must share ground with the NodeMCU.
 -  Don't power the NodeMCU through VIN from the same 5V supply. VIN goes through the onboard voltage regulator and can cause instability with a high-current LED strip on the same rail. Power the NodeMCU separately via USB only. The 5V from PSU should go directly to the LED strip and capacitor only — not touch the NodeMCU at all.
+-  Hardware watchdog timer: the ESP8266 has a built-in software watchdog that resets the chip if loop() stops running. The built-in watchdog is usually sufficient for a project like this. The only risky blocking section is smoothFade() which takes about 800ms — well within any watchdog timeout set.
 
 ---
 
@@ -251,3 +253,146 @@ Other changes:
 - API polling and pulse only run when actually in MODE_LIVE — team color modes are fully static, no unnecessary network calls
 
 ![reference table](assets/mode-reference-table.png)
+
+# Production Deployment Checklist
+
+This checklist ensures the F1 Live Race Reactive LED Display system is ready for permanent installation and reliable operation.
+
+Complete all sections before enclosure assembly.
+
+---
+
+# 1. Firmware Validation
+
+## Mode System
+
+- [ ] Button cycles through all 13 modes
+- [ ] Mode 0 = Display Mode
+- [ ] Mode 1 = Live Mode
+- [ ] Modes 2–12 = Manual Team Override
+- [ ] Mode wraps from 12 → 0 correctly
+- [ ] No skipped or duplicated modes
+- [ ] No double-trigger per button press
+
+## Live Mode Behavior
+
+- [ ] Entering Mode 1 triggers immediate API fetch
+- [ ] Leader name prints correctly in Serial Monitor
+- [ ] Race status prints correctly
+- [ ] Live mode polling occurs every 2 minutes
+- [ ] Pulse effect runs only in Live Mode
+- [ ] Checkered wipe triggers when status = "Finished"
+
+## EEPROM Persistence
+
+- [ ] Winner stored after race completion
+- [ ] Power cycle restores stored winner
+- [ ] No corrupted EEPROM values
+
+---
+
+# 2. API & Network Validation
+
+## WiFi
+
+- [ ] Device connects reliably on boot
+- [ ] No infinite reconnect loops
+- [ ] IP address prints in Serial
+
+## Jolpica API
+
+- [ ] HTTPS returns HTTP 200
+- [ ] JSON parses without error
+- [ ] Leader constructor name is correct
+- [ ] No crashes during API failure
+- [ ] Handles non-race days gracefully
+
+---
+
+# 3. Electrical Validation
+
+## Power Supply
+
+- [ ] 5V regulated external supply used
+- [ ] Minimum 4A rating for 60 LEDs
+- [ ] No voltage drop under load
+- [ ] No flickering at full brightness
+
+## Wiring
+
+- [ ] Common ground between NodeMCU and LED strip
+- [ ] 330Ω resistor on data line
+- [ ] 1000µF capacitor across 5V and GND
+- [ ] Secure solder joints (no loose Dupont wires)
+
+## Button
+
+- [ ] Button wired to D5 and GND
+- [ ] Uses INPUT_PULLUP
+- [ ] Stable debounce
+- [ ] Does not affect boot mode
+
+---
+
+# 4. Thermal & Stability Testing
+
+Run for minimum 30–60 minutes.
+
+- [ ] No random resets
+- [ ] No LED flickering
+- [ ] No WiFi dropouts
+- [ ] No memory crashes
+- [ ] No unexpected mode changes
+- [ ] Board temperature within safe range
+
+Optional:
+
+- [ ] Monitor heap memory using `ESP.getFreeHeap()`
+- [ ] Confirm stable memory after repeated API calls
+
+---
+
+# 5. Brightness & Visual Calibration
+
+- [ ] Day brightness acceptable
+- [ ] Night brightness not overpowering
+- [ ] Manual team colors visibly distinct
+- [ ] White display mode evenly illuminates models
+- [ ] Checkered animation clearly visible
+
+---
+
+# 6. Enclosure Installation Checklist
+
+Before sealing enclosure:
+
+- [ ] Confirm WiFi signal strength inside enclosure
+- [ ] Ensure adequate ventilation
+- [ ] Secure LED strip firmly around frame
+- [ ] Strain relief on power cables
+- [ ] Button accessible and mechanically stable
+- [ ] No exposed power terminals
+
+After enclosure:
+
+- [ ] Final power-on test
+- [ ] Confirm all modes still functional
+- [ ] Confirm API fetch still works
+
+---
+
+# 7. Long-Term Reliability Recommendations
+
+- Avoid powering from USB for permanent use
+- Avoid cheap unregulated adapters
+- Reboot device once per race weekend if desired
+- Keep firmware backed up in repository
+- Keep API endpoint documented in README
+
+---
+
+# Production Status
+
+When all boxes are checked:
+
+System is ready for permanent deployment.
