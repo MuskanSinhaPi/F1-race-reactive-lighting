@@ -88,7 +88,7 @@ Dark brand colors have been adjusted to improve real-world visibility on WS2812B
 
 | NodeMCU Pin | LED Strip |
 |-------------|-----------|
-| D4 (GPIO2)  | DIN (via 330Ω resistor) |
+| D2 (GPIO4)  | DIN (via 330Ω resistor) |
 | GND         | GND |
 | External 5V | 5V |
 
