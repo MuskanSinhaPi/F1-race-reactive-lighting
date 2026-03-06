@@ -17,13 +17,14 @@
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 // ================= SERIAL TO NANO =================
+#define BUTTON_PIN D3
 #define NANO_RX  D6
 #define NANO_TX  D8
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
 // ================= WIFI =================
-const char* ssid     = "YOUR WIFI SSID";
-const char* password = "YOUR WIFI PASSWORD";
+const char* ssid     = "Muskan_2.4 G";
+const char* password = "8527245177";
 
 // ================= TIMING =================
 unsigned long lastCheck     = 0;
@@ -187,11 +188,6 @@ void loop() {
 
   delay(50);
 }
-
-// ==========================================================
-// BUTTON PIN define (was missing)
-// ==========================================================
-#define BUTTON_PIN D3
 
 // ==========================================================
 // DRAW BOOT SCREEN
