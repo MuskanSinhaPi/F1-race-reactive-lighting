@@ -219,6 +219,12 @@ The correct solution is architectural separation:
 - NodeMCU handles networking
 - Nano handles LED timing
 
+##While uploading to NodeMCU (ESP8266): _A fatal esptool.py error occurred: failed to connect to esp8266: timed out waiting for packet header_
+
+_GPIO 0 should be pulled LOW, though a nodeMCU should do this automatically, Reset should stay HIGH, and again the nodeMCU will do an automated reset.
+GPIO15 is pulled down or the board won't work, (also on the board already) Basically you should not have to connect anything special to make it work, and anything that you do connect to any of these pins (+ TX & GPIO 2) may disturb the upload process._
+src: https://forum.arduino.cc/t/a-fatal-esptool-py-error-occurred-failed-to-connect-to-esp8266-timed-out-waiting-for-packet-header/1159116
+
 ---
 
 # Production Deployment Checklist
