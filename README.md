@@ -272,3 +272,166 @@ The correct solution is architectural separation:
 # Project Status
 
 When all checklist items are validated, the system is ready for permanent installation.
+
+#Edit
+## 1.8" TFT Display Integration (NodeMCU ESP8266)
+
+This project uses a **1.8" SPI TFT display (ST7735, 128×160)** to show live race information such as session status, leading constructor, and countdown timers.
+
+The display communicates over **SPI**, which is well supported by the ESP8266.
+
+---
+
+## Hardware Wiring
+
+| TFT Pin | NodeMCU |
+|--------|---------|
+| VCC | **3V3** |
+| GND | **GND** |
+| LED | **3V3** |
+| SCK | **D5 (GPIO14)** |
+| SDA (MOSI) | **D7 (GPIO13)** |
+| CS | **D2 (GPIO4)** |
+| A0 / DC | **D1 (GPIO5)** |
+| RESET | **RST** or **D0** |
+
+### Required Libraries
+
+Install the following libraries via the Arduino Library Manager:
+
+- `Adafruit ST7735 and ST7789 Library`
+- `Adafruit GFX Library`
+
+---
+
+## Display Layout (160×128 Landscape)
+
+```
+┌─────────────────────────────┐
+│ F1 LIVE          HH:MM:SS   │
+├─────────────────────────────┤
+│ Australian Grand Prix       │
+├─┬───────────────────────────┤
+│█│ P1 CONSTRUCTOR            │
+│█│ McLAREN                   │
+├─┴───────────────────────────┤
+│ STATUS: LIVE                │
+├─────────────────────────────┤
+│ MODE: LIVE                  │
+├─────────────────────────────┤
+│ LIGHTS OUT: 01:23:45        │
+├─────────────────────────────┤
+│ Round 4          jolpi.ca   │
+└─────────────────────────────┘
+```
+
+Elements displayed:
+
+- **Header**: live clock and system status
+- **Race title**: current Grand Prix
+- **Team indicator**: colored stripe showing the leading constructor
+- **Status line**: session state (LIVE / COMPLETE / UPCOMING)
+- **Countdown timer**: time until lights out or race completion
+- **Footer**: round number and API source
+
+---
+
+## ESP8266 Boot-Strapping Pins
+
+Some ESP8266 pins are **boot-strapping pins**.  
+When the board powers on or resets, the chip briefly reads their voltage levels to determine the **boot mode**.
+
+### Voltage States
+
+| State | Voltage |
+|------|---------|
+| HIGH | ~3.3V |
+| LOW | 0V (GND) |
+
+During the first few milliseconds after startup, these pins must be at specific levels.
+
+### Boot Pin Requirements
+
+| Pin | GPIO | Required State |
+|----|------|---------------|
+| **D3** | GPIO0 | HIGH |
+| **D4** | GPIO2 | HIGH |
+| **D8** | GPIO15 | LOW |
+
+If these conditions are met, the ESP8266 **boots normally from flash memory**.
+
+### What Happens if the States are Wrong
+
+| Condition | Result |
+|----------|--------|
+| GPIO0 LOW | Device enters **programming (flash) mode** |
+| GPIO2 LOW | **Boot failure** |
+| GPIO15 HIGH | **Boot failure** |
+
+Common symptoms include:
+
+- board stuck in reset loop
+- no program execution
+- unusual boot messages on the serial monitor
+
+### Why External Circuits Can Cause Issues
+
+Connecting peripherals to these pins can unintentionally force the wrong voltage level during startup.
+
+Example:
+
+- **Button on D3**  
+  If pressed during boot, GPIO0 becomes LOW → ESP8266 enters flash mode.
+
+- **Device driving D8 HIGH**  
+  GPIO15 must be LOW during boot → the board will fail to start.
+
+### Why NodeMCU Usually Works Anyway
+
+NodeMCU boards include default resistors:
+
+| Pin | Default Pull |
+|----|--------------|
+| GPIO0 | Pull-up |
+| GPIO2 | Pull-up |
+| GPIO15 | Pull-down |
+
+These ensure correct boot behavior **unless external hardware overrides them**.
+
+---
+
+## Safe Pins for Peripherals
+
+Recommended pins for most devices:
+
+```
+D1
+D2
+D5
+D6
+D7
+```
+
+Pins that require caution:
+
+```
+D3
+D4
+D8
+```
+
+---
+
+## Notes for This Project
+
+Current pin usage:
+
+- **D3 → push button input**
+- **D8 → UART TX from Arduino Nano**
+
+This configuration works provided that:
+
+- the push button is **not pressed during boot**
+- the Arduino Nano **does not drive D8 HIGH during startup**
+
+If the ESP8266 ever becomes stuck in a boot loop, the **first thing to check is the state of these boot-strapping pins**.
