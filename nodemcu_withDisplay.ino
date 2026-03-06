@@ -728,31 +728,3 @@ int getTeamID(String team) {
   if (team.indexOf("Williams")     >= 0) return TEAM_WILLIAMS;
   return TEAM_MCLAREN;
 }
-```
-
----
-
-**Install these two libraries:**
-- `Adafruit ST7735 and ST7789 Library`
-- `Adafruit GFX Library`
-
----
-
-**Screen layout (160×128 landscape):**
-```
-┌─────────────────────────────┐
-│ F1 LIVE          HH:MM:SS   │  ← red header + live clock
-├─────────────────────────────┤
-│ Australian Grand Prix        │  ← race name
-├─┬───────────────────────────┤
-│█│ P1 CONSTRUCTOR             │  ← team color stripe
-│█│ McLAREN                    │  ← team name in team color
-├─┴───────────────────────────┤
-│ STATUS: LIVE                 │
-├─────────────────────────────┤
-│ MODE: LIVE                   │
-├─────────────────────────────┤
-│ LIGHTS OUT: 01:23:45         │  ← countdown / race complete
-├─────────────────────────────┤
-│ Round 4          jolpi.ca    │  ← footer
-└─────────────────────────────┘
