@@ -556,13 +556,13 @@ const char* getModeName(int mode) {
     case MODE_LIVE:     return "LIVE";
     case MODE_FERRARI:  return "FERRARI";
     case MODE_ALPINE:   return "ALPINE";
-    case MODE_ASTON:    return "ASTON MR";
+    case MODE_ASTON:    return "ASTON MARTIN";
     case MODE_HAAS:     return "HAAS";
     case MODE_AUDI:     return "AUDI";
     case MODE_CADILLAC: return "CADILLAC";
     case MODE_MCLAREN:  return "McLAREN";
     case MODE_MERCEDES: return "MERCEDES";
-    case MODE_RBULLS:   return "RB";
+    case MODE_RBULLS:   return "RACING BULLS";
     case MODE_REDBULL:  return "RED BULL";
     case MODE_WILLIAMS: return "WILLIAMS";
     default: return "---";
