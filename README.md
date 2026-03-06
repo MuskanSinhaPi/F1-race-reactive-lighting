@@ -279,9 +279,9 @@ src: https://forum.arduino.cc/t/a-fatal-esptool-py-error-occurred-failed-to-conn
 
 When all checklist items are validated, the system is ready for permanent installation.
 
-##Edit
+# Edit
 
-###1.8" TFT Display Integration (NodeMCU ESP8266)
+### 1.8" TFT Display Integration (NodeMCU ESP8266)
 
 This project uses a **1.8" SPI TFT display (ST7735, 128×160)** to show live race information such as session status, leading constructor, and countdown timers.
 
