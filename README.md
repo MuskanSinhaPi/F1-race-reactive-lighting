@@ -279,8 +279,9 @@ src: https://forum.arduino.cc/t/a-fatal-esptool-py-error-occurred-failed-to-conn
 
 When all checklist items are validated, the system is ready for permanent installation.
 
-#Edit
-## 1.8" TFT Display Integration (NodeMCU ESP8266)
+##Edit
+
+###1.8" TFT Display Integration (NodeMCU ESP8266)
 
 This project uses a **1.8" SPI TFT display (ST7735, 128×160)** to show live race information such as session status, leading constructor, and countdown timers.
 
@@ -441,3 +442,21 @@ This configuration works provided that:
 - the Arduino Nano **does not drive D8 HIGH during startup**
 
 If the ESP8266 ever becomes stuck in a boot loop, the **first thing to check is the state of these boot-strapping pins**.
+
+### A common issue with NodeMCU + breadboard is that the board is wider than the breadboard center gap.
+
+- You do NOT need to use RST, and you should avoid D0 because it can interfere with deep-sleep/reset behavior.
+- The easiest solution is to use another normal GPIO for RESET and update the pin definition in your code
+
+**Why D4 works
+
+- D4 is a boot-strap pin that must be HIGH during boot, but the TFT reset pin is high-impedance, so it won’t pull the pin low.
+- This is a very common configuration for ST7735 on ESP8266.
+- You can avoid wiring RESET completely and let the library control it internally.
+
+Connect TFT RESET to 3.3V permanently and set:
+```cpp
+#define TFT_RST  -1
+```
+
+This works because the display already resets during power-up.
