@@ -58,7 +58,6 @@ void setup() {
 }
 
 // ==========================================================
-
   void loop() {
 
   // From ESP8266
@@ -102,7 +101,6 @@ void handleCommand(int cmd) {
   if (cmd == CMD_CHECKERED) {
     pulsing = false;
     checkeredWipe();
-    restoreTeamAfterAnimation();
     return;
   }
 
@@ -270,6 +268,7 @@ void checkeredWipe() {
       delay(70);
     }
   }
+  currentTeam = -1;
 }
 
 // ==========================================================
