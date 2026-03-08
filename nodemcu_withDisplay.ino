@@ -23,8 +23,8 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
 // ================= WIFI =================
-const char* ssid     = "Muskan_2.4 G";
-const char* password = "8527245177";
+const char* ssid     = "your wifi SSID";
+const char* password = "your password";
 
 // ================= TIMING =================
 unsigned long lastCheck       = 0;
