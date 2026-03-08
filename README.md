@@ -20,6 +20,8 @@ During a race:
 
 No backend server is required.
 
+**In code, replace your WiFi Credentials
+**Also, replace the number of LEDs
 ---
 
 # System Architecture
