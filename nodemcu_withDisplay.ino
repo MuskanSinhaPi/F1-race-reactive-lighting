@@ -23,8 +23,8 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
 // ================= WIFI =================
-const char* ssid     = "your wifi SSID";
-const char* password = "your password";
+const char* ssid     = "YOUR WIFI SSID";
+const char* password = "YOUR WIFI PASSWORD";
 
 // ================= TIMING =================
 unsigned long lastCheck       = 0;
@@ -666,7 +666,7 @@ void detectNextRace() {
       raceTm.tm_hour = hh;
       raceTm.tm_min  = mm;
       raceTm.tm_sec  = ss;
-      raceStartEpoch = mktime(&raceTm);
+      raceStartEpoch = mktime(&raceTm) - 19800;
 
       time_t now = time(nullptr);
       struct tm* nowTm = localtime(&now);
@@ -799,7 +799,6 @@ void fetchRaceData() {
             delay(9000);             // wait for full checkered animation
             sendToNano(teamID);
             delay(500);
-            sendToNano(CMD_PULSE);
             return;                   // skip the https.end() at bottom
       
           } else {
