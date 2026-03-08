@@ -291,3 +291,11 @@ Both persist across power cycles. On boot, slot 0 restores the LED color shown b
 One-way only. NodeMCU transmits, Nano receives. Each message is an ASCII integer followed by `\n`. Nano reads with `readStringUntil('\n')` and converts with `toInt()`.
 
 SoftwareSerial at 9600 baud on NodeMCU D8 → 2.2kΩ resistor → Nano pin 8. The resistor protects Nano's 5V RX pin from NodeMCU's 3.3V TX — technically the direction (3.3V into 5V input) is safe without a resistor since 3.3V is within the logic LOW/HIGH threshold of a 5V AVR, but the resistor adds protection against any accidental voltage spikes.
+
+**So the full sequence on race day is:
+
+Boot → shows LIGHTS OUT: XX:XX:XX counting down
+At T-5 seconds → screen flashes red, sends CMD_LIGHTS_OUT to Nano
+Past start time → shows RACE IN PROGRESS
+Every 2 minutes → fetches results, updates P1 constructor
+Race finishes → checkered wipe, winner shown, RACE COMPLETE
