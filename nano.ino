@@ -2,7 +2,7 @@
 #include <SoftwareSerial.h>
 
 #define STRIP_PIN   6
-#define NUM_LEDS    300
+#define NUM_LEDS    125
 #define ESP_RX_PIN  8
 #define ESP_TX_PIN  9
 
