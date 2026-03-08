@@ -72,6 +72,7 @@ const unsigned long clockRefresh = 1000;
 // ================= EEPROM SLOTS =================
 #define EEPROM_LAST_RACE    0
 #define EEPROM_SEASON_CHAMP 2
+#define EEPROM_LAST_GP_NAME 3 
 
 // ================= TFT COLOR CONSTANTS =================
 #define C_BG        0x0000
@@ -124,7 +125,7 @@ int  lastSentTeam  = -1;
 int  currentTeamID = TEAM_MCLAREN;
 
 char raceName[64]   = "---";
-char lastGPName[64] = "---";
+char lastGPName[64] = "Australian";
 char p1Team[32]     = "---";
 char p1Status[16]   = "---";
 time_t raceStartEpoch = 0;
@@ -159,7 +160,7 @@ void setup() {
   Serial.begin(115200);
   nanoSerial.begin(9600);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  EEPROM.begin(10);
+  EEPROM.begin(32);
 
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(1);
@@ -194,6 +195,13 @@ void setup() {
   int savedTeam = EEPROM.read(EEPROM_LAST_RACE);
   if (savedTeam >= 1 && savedTeam <= 11) currentTeamID = savedTeam;
 
+  char savedGP[21] = {};
+  for (int i = 0; i < 20; i++)
+    savedGP[i] = EEPROM.read(EEPROM_LAST_GP_NAME + i);
+  savedGP[20] = '\0';
+  if (savedGP[0] >= 'A' && savedGP[0] <= 'z')  // basic validity check
+    strncpy(lastGPName, savedGP, sizeof(lastGPName) - 1);
+  
   drawMainScreen();
 
   if (raceSunday && currentMode == MODE_LIVE) {
@@ -431,7 +439,7 @@ void updateTeamDisplay(int teamID, bool isLive) {
     gpShort[13] = '\0';
     char* gp = strstr(gpShort, " Grand");
     if (gp) *gp = '\0';
-    snprintf(label, sizeof(label), "Last GP: %s", gpShort);
+    snprintf(label, sizeof(label), "Last GP: %s | P1:", gpShort);
     tft.print(label);
   } else {
     tft.print("CONSTRUCTOR");
@@ -782,6 +790,15 @@ void fetchRaceData() {
 
       // Save last race winner
       EEPROM.write(EEPROM_LAST_RACE, teamID);
+
+      // Strip " Grand Prix" to get just country name
+      char shortGP[21] = {};
+      strncpy(shortGP, lastGPName, 20);
+      char* gp = strstr(shortGP, " Grand");
+      if (gp) *gp = '\0';
+      for (int i = 0; i < 20; i++)
+        EEPROM.write(EEPROM_LAST_GP_NAME + i, shortGP[i]);
+      EEPROM.commit();
 
       // If this is the final round, also save season champion
       if (currentRound == totalRounds) {
