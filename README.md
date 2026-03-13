@@ -56,12 +56,32 @@ WS2812B LED Strip
 
 This design avoids 3.3V logic-level instability by letting the **Nano drive the strip directly at 5V logic**.
 
+NodeMCU:
+
+- 24-hour window race detection (timezone-safe)
+- IST offset fix on raceStartEpoch
+- Countdown on TFT, turns red under 5 minutes
+- Lights out at T-5s
+- 2-minute live polling with date guard
+- Checkered + winner sequence with SSL closed before Nano commands
+- EEPROM persistence for winner, mode, season champ, GP name
+- TFT partial redraws to avoid flicker
+
+Nano:
+
+- Smooth fade between constructors
+- Pulse only during live race
+- currentTeam = -1 reset after checkered so fade always plays
+- if (team == currentTeam) return kept for mid-race efficiency
+- Lights out animation then restore + pulse
+- Accent pixels for Haas, Cadillac, Red Bull
+
 ---
 
 # Features
 
 - Live race leader display
-- Sunday-only race detection
+- Sunday-only race detection (timezone-agnostic; . If the race starts within the next 24 hours, it's race day. Some races like the Americas (Mexico, USA, Brazil) <br> run on a Sunday locally but that's Monday IST.)
 - Smooth fade between constructors
 - Pulse while race status = LIVE
 - Lights-out red countdown animation
