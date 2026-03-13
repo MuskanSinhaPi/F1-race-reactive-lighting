@@ -675,10 +675,10 @@ void detectNextRace() {
       raceTm.tm_min  = mm;
       raceTm.tm_sec  = ss;
       raceStartEpoch = mktime(&raceTm) - 19800;
-
+      
       time_t now = time(nullptr);
-      struct tm* nowTm = localtime(&now);
-      if (nowTm->tm_wday == 0) raceSunday = true;
+      double diff = difftime(raceStartEpoch, now);
+      if (diff >= 0 && diff <= 86400) raceSunday = true;
 
       Serial.printf("Race: %s | Round: %d/%d | Sunday: %s\n",
                     raceName, currentRound, totalRounds,
