@@ -674,7 +674,20 @@ void detectNextRace() {
       raceTm.tm_hour = hh;
       raceTm.tm_min  = mm;
       raceTm.tm_sec  = ss;
-      raceStartEpoch = mktime(&raceTm) - 19800;
+
+      // Manual UTC to epoch conversion (avoids mktime local time assumption)
+      // Days from 1970 to race date
+      int y = ry, m = rm, d = rd;
+      int days = (y - 1970) * 365;
+      // leap years
+      for (int i = 1970; i < y; i++)
+        if ((i % 4 == 0 && i % 100 != 0) || i % 400 == 0) days++;
+      int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+      if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) mdays[1] = 29;
+      for (int i = 0; i < m - 1; i++) days += mdays[i];
+      days += d - 1;
+      raceStartEpoch = (time_t)days * 86400 + hh * 3600 + mm * 60 + ss;
+      
       
       time_t now = time(nullptr);
       double diff = difftime(raceStartEpoch, now);
