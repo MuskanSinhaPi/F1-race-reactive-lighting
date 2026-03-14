@@ -76,6 +76,22 @@ Nano:
 - Lights out animation then restore + pulse
 - Accent pixels for Haas, Cadillac, Red Bull
 
+### Walking through all live mode scenarios:
+
+- Non-race day boot: raceSunday = false → applyMode() → sends savedTeam, sets lastSentTeam, shows "NO RACE" 
+
+- Race day boot, pre-race:raceSunday = true, fetchRaceData() called → date guard hits "PRE RACE" → countdown runs on TFT 
+
+- Race day boot, race in progress: fetchRaceData() → date guard passes → sends teamID + pulse → shows "LIVE" → polls every 2 min 
+
+- Race day boot, race already finished: fetchRaceData() → status "Finished" → checkered + winner → raceFinished = true 
+
+- Mode switch to LIVE during race: raceSunday = true, raceFinished = false → fetches immediately 
+
+- Mode switch to LIVE after race finished: raceFinished = true → skips fetch, shows "FINISHED" → no spurious Nano commands 
+
+- Mode switch away and back during race:lastSentTeam = -1 reset on re-entry → next fetch will resend teamID + pulse even if same team 
+
 ---
 
 # Features
