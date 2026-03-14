@@ -593,6 +593,8 @@ void applyMode(int mode) {
 
     updateTeamDisplay(savedTeam, true);
     updateModeDisplay();
+    sendToNano(savedTeam);      
+    lastSentTeam = savedTeam;
 
     if (raceSunday && !raceFinished) {
       updateStatus("FETCHING", C_YELLOW);
