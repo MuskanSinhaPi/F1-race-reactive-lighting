@@ -72,7 +72,7 @@ const unsigned long clockRefresh = 1000;
 // ================= EEPROM SLOTS =================
 #define EEPROM_LAST_RACE    0
 #define EEPROM_SEASON_CHAMP 2
-#define EEPROM_LAST_GP_NAME 3 
+#define EEPROM_LAST_GP_NAME 3
 
 // ================= TFT COLOR CONSTANTS =================
 #define C_BG        0x0000
@@ -120,7 +120,7 @@ unsigned long lastDebounce = 0;
 
 int  currentMode   = MODE_LIVE;
 int  currentRound  = -1;
-int  totalRounds   = 24;   // fallback, updated from API
+int  totalRounds   = 24;
 int  lastSentTeam  = -1;
 int  currentTeamID = TEAM_MCLAREN;
 
@@ -150,6 +150,7 @@ void updateClock();
 void updateCountdown();
 const char* getModeName(int mode);
 String getTodayDate();
+String getYesterdayDate();
 int getTeamID(String team);
 
 // ==========================================================
@@ -199,9 +200,9 @@ void setup() {
   for (int i = 0; i < 20; i++)
     savedGP[i] = EEPROM.read(EEPROM_LAST_GP_NAME + i);
   savedGP[20] = '\0';
-  if (savedGP[0] >= 'A' && savedGP[0] <= 'z')  // basic validity check
+  if (savedGP[0] >= 'A' && savedGP[0] <= 'z')
     strncpy(lastGPName, savedGP, sizeof(lastGPName) - 1);
-  
+
   drawMainScreen();
 
   if (raceSunday && currentMode == MODE_LIVE) {
@@ -582,7 +583,8 @@ void applyMode(int mode) {
   }
 
   if (mode == MODE_LIVE) {
-    raceFinished = false;
+    // Only reset raceFinished if there is no active race day
+    if (!raceSunday) raceFinished = false;
     lastSentTeam = -1;
 
     int savedTeam = EEPROM.read(EEPROM_LAST_RACE);
@@ -592,11 +594,14 @@ void applyMode(int mode) {
     updateTeamDisplay(savedTeam, true);
     updateModeDisplay();
 
-    if (raceSunday) {
+    if (raceSunday && !raceFinished) {
       updateStatus("FETCHING", C_YELLOW);
       fetchRaceData();
+    } else if (raceFinished) {
+      updateStatus("FINISHED", C_GREEN);
     } else {
       sendToNano(savedTeam);
+      lastSentTeam = savedTeam;
       updateStatus("NO RACE", C_GREY);
     }
     return;
@@ -648,7 +653,6 @@ void detectNextRace() {
     StaticJsonDocument<2048> doc;
     deserializeJson(doc, https.getString());
 
-    // Total rounds this season — used to detect final race
     const char* totalStr = doc["MRData"]["total"];
     if (totalStr) totalRounds = atoi(totalStr);
     Serial.printf("Total rounds this season: %d\n", totalRounds);
@@ -667,19 +671,9 @@ void detectNextRace() {
       sscanf(date,  "%d-%d-%d", &ry, &rm, &rd);
       sscanf(timeS, "%d:%d:%dZ", &hh, &mm, &ss);
 
-      struct tm raceTm = {};
-      raceTm.tm_year = ry - 1900;
-      raceTm.tm_mon  = rm - 1;
-      raceTm.tm_mday = rd;
-      raceTm.tm_hour = hh;
-      raceTm.tm_min  = mm;
-      raceTm.tm_sec  = ss;
-
-      // Manual UTC to epoch conversion (avoids mktime local time assumption)
-      // Days from 1970 to race date
+      // Manual UTC epoch calculation — avoids mktime() local time assumption
       int y = ry, m = rm, d = rd;
       int days = (y - 1970) * 365;
-      // leap years
       for (int i = 1970; i < y; i++)
         if ((i % 4 == 0 && i % 100 != 0) || i % 400 == 0) days++;
       int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
@@ -687,13 +681,13 @@ void detectNextRace() {
       for (int i = 0; i < m - 1; i++) days += mdays[i];
       days += d - 1;
       raceStartEpoch = (time_t)days * 86400 + hh * 3600 + mm * 60 + ss;
-      
-      
+
+      // Race day check: within next 24 hours (timezone-safe)
       time_t now = time(nullptr);
       double diff = difftime(raceStartEpoch, now);
       if (diff >= 0 && diff <= 86400) raceSunday = true;
 
-      Serial.printf("Race: %s | Round: %d/%d | Sunday: %s\n",
+      Serial.printf("Race: %s | Round: %d/%d | Race day: %s\n",
                     raceName, currentRound, totalRounds,
                     raceSunday ? "YES" : "NO");
     }
@@ -773,12 +767,13 @@ void fetchRaceData() {
       return;
     }
 
-    // Date guard
-    String today = getTodayDate();
-    if (String(resultDate) != today) {
+    // Date guard — check today AND yesterday to handle UTC/IST boundary
+    String today     = getTodayDate();
+    String yesterday = getYesterdayDate();
+    if (String(resultDate) != today && String(resultDate) != yesterday) {
       Serial.printf("Results from %s, today %s — skipping\n",
                     resultDate, today.c_str());
-      updateStatus("NO RACE", C_GREY);
+      updateStatus(raceSunday ? "PRE RACE" : "NO RACE", C_YELLOW);
       https.end();
       return;
     }
@@ -796,22 +791,23 @@ void fetchRaceData() {
       sendToNano(teamID);
       sendToNano(CMD_PULSE);
       lastSentTeam = teamID;
+      updateStatus("LIVE", C_GREEN);
     }
 
     if (String(status) == "Finished") {
       raceFinished = true;
+      lastSentTeam = teamID;
 
       // Save last race winner
       EEPROM.write(EEPROM_LAST_RACE, teamID);
 
-      // Strip " Grand Prix" to get just country name
+      // Strip " Grand Prix" to get just country name and save to EEPROM
       char shortGP[21] = {};
       strncpy(shortGP, lastGPName, 20);
       char* gp = strstr(shortGP, " Grand");
       if (gp) *gp = '\0';
       for (int i = 0; i < 20; i++)
         EEPROM.write(EEPROM_LAST_GP_NAME + i, shortGP[i]);
-      EEPROM.commit();
 
       // If this is the final round, also save season champion
       if (currentRound == totalRounds) {
@@ -819,36 +815,44 @@ void fetchRaceData() {
         Serial.printf("Season champion saved: %s\n", teamNames[teamID]);
       }
 
-      EEPROM.commit();
-      
-            https.end(); // close SSL connection BEFORE sending to Nano
-      
-            updateStatus("FINISHED", C_GREEN);
-            drawRaceFinished(teamID); // ~1.2s natural delay while TFT animates
-            sendToNano(CMD_CHECKERED);
-            delay(9000);             // wait for full checkered animation
-            sendToNano(teamID);
-            delay(500);
-            return;                   // skip the https.end() at bottom
-      
-          } else {
-            updateStatus("LIVE", C_GREEN);
-          }
-      
-        } else {
-          Serial.printf("HTTP error: %d\n", https.GET());
-          updateStatus("API ERR", C_RED);
-        }
-      
-        https.end();
-      }
+      EEPROM.commit(); // single commit for all writes
+
+      https.end(); // close SSL before sending to Nano
+
+      updateStatus("FINISHED", C_GREEN);
+      drawRaceFinished(teamID);
+      sendToNano(CMD_CHECKERED);
+      delay(9000);
+      sendToNano(teamID);
+      delay(500);
+      return;
+
+    } else {
+      updateStatus("LIVE", C_GREEN);
+    }
+
+  } else {
+    Serial.printf("HTTP error: %d\n", https.GET());
+    updateStatus("API ERR", C_RED);
+  }
+
+  https.end();
+}
 
 // ==========================================================
-// DATE HELPER
+// DATE HELPERS
 // ==========================================================
 
 String getTodayDate() {
   time_t now = time(nullptr);
+  struct tm* t = localtime(&now);
+  char buf[11];
+  sprintf(buf, "%04d-%02d-%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
+  return String(buf);
+}
+
+String getYesterdayDate() {
+  time_t now = time(nullptr) - 86400;
   struct tm* t = localtime(&now);
   char buf[11];
   sprintf(buf, "%04d-%02d-%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
