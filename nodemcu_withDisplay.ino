@@ -693,8 +693,10 @@ void detectNextRace() {
       time_t endEpoch = (time_t)days * 86400 + hh * 3600 + mm * 60;
 
       time_t now = time(nullptr);
-      // FIX: just check diffEnd > 0 — covers all race weekend states
-      if (difftime(endEpoch, now) > 0) raceSunday = true;
+      double diffEnd   = difftime(endEpoch, now);
+      double diffStart = difftime(raceStartEpoch, now);
+      // Race weekend: endDate hasn't passed AND race starts within 48h or already started
+      if (diffEnd > 0 && diffStart <= 172800) raceSunday = true;
     }
 
     Serial.printf("ESPN Race: %s | raceDay: %s | raceStart diff: %.0f s\n",
