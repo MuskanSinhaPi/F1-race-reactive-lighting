@@ -599,7 +599,15 @@ void applyMode(int mode) {
     updateModeDisplay();
     sendToNano(savedTeam);     // always show last known P1 color immediately
     lastSentTeam = savedTeam;
-
+    sendToNano(savedTeam);     // always show last known P1 color immediately
+    lastSentTeam = savedTeam;
+    
+    // If race is in progress, pulse immediately
+    time_t now = time(nullptr);
+    double elapsed = difftime(now, raceStartEpoch);
+    if (raceSunday && !raceFinished && elapsed >= 0)
+      sendToNano(CMD_PULSE);
+    
     if (raceSunday && !raceFinished) {
       updateStatus("FETCHING", C_YELLOW);
       fetchRaceData();
