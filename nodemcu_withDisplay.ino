@@ -23,16 +23,18 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
 // ================= WIFI =================
-const char* ssid     = "YOUR WIFI SSID";
-const char* password = "YOUR WIFI PASSWORD";
+const char* ssid     = "wifi ssid";
+const char* password = "wifi password";
 
 // ================= TIMING =================
 unsigned long lastCheck       = 0;
 unsigned long lastWifiCheck   = 0;
 unsigned long lastClockUpdate = 0;
-const unsigned long interval     = 120000;
+unsigned long lastNTPSync     = 0;
+const unsigned long interval     = 30000;   // 30s polling during race
 const unsigned long wifiRetry    = 30000;
 const unsigned long clockRefresh = 1000;
+const unsigned long ntpResync    = 1800000; // 30 min NTP resync
 
 // ================= TEAM IDs =================
 #define TEAM_FERRARI       1
@@ -220,6 +222,13 @@ void loop() {
   checkButton();
   maintainWiFi();
   checkLightsOutCountdown();
+
+  // Periodic NTP resync every 30 minutes
+  if (millis() - lastNTPSync > ntpResync) {
+    lastNTPSync = millis();
+    configTime(19800, 0, "pool.ntp.org");
+    Serial.println("NTP resynced");
+  }
 
   if (millis() - lastClockUpdate > clockRefresh) {
     lastClockUpdate = millis();
@@ -593,7 +602,7 @@ void applyMode(int mode) {
 
     updateTeamDisplay(savedTeam, true);
     updateModeDisplay();
-    sendToNano(savedTeam);      
+    sendToNano(savedTeam);     // always show last known P1 color immediately
     lastSentTeam = savedTeam;
 
     if (raceSunday && !raceFinished) {
@@ -602,8 +611,6 @@ void applyMode(int mode) {
     } else if (raceFinished) {
       updateStatus("FINISHED", C_GREEN);
     } else {
-      sendToNano(savedTeam);
-      lastSentTeam = savedTeam;
       updateStatus("NO RACE", C_GREY);
     }
     return;
@@ -684,14 +691,14 @@ void detectNextRace() {
       days += d - 1;
       raceStartEpoch = (time_t)days * 86400 + hh * 3600 + mm * 60 + ss;
 
-      // Race day check: within next 24 hours (timezone-safe)
+      // Race day: within next 24h OR started within last 6h (handles mid-race reboot)
       time_t now = time(nullptr);
       double diff = difftime(raceStartEpoch, now);
-      if (diff >= 0 && diff <= 86400) raceSunday = true;
+      if (diff >= -21600 && diff <= 86400) raceSunday = true;
 
-      Serial.printf("Race: %s | Round: %d/%d | Race day: %s\n",
+      Serial.printf("Race: %s | Round: %d/%d | Race day: %s | Diff: %.0f s\n",
                     raceName, currentRound, totalRounds,
-                    raceSunday ? "YES" : "NO");
+                    raceSunday ? "YES" : "NO", diff);
     }
   }
   https.end();
@@ -707,7 +714,7 @@ void checkLightsOutCountdown() {
   time_t now = time(nullptr);
   double diff = difftime(raceStartEpoch, now);
 
-  if (diff <= 5 && diff > 0 && !lightsOutTriggered) {
+  if (diff <= 10 && diff > -5 && !lightsOutTriggered) {
     Serial.println("LIGHTS OUT!");
     sendToNano(CMD_LIGHTS_OUT);
     lightsOutTriggered = true;
@@ -719,6 +726,7 @@ void checkLightsOutCountdown() {
       delay(150);
     }
     drawMainScreen();
+    updateStatus("LIVE", C_GREEN);
   }
 }
 
@@ -768,14 +776,31 @@ void fetchRaceData() {
       https.end();
       return;
     }
-
-    // Date guard — check today AND yesterday to handle UTC/IST boundary
+    
+    time_t now = time(nullptr);
+    double elapsed = difftime(now, raceStartEpoch);
+    
+    // Before race starts — skip
+    if (elapsed < 0) {
+      updateStatus("PRE RACE", C_YELLOW);
+      https.end();
+      return;
+    }
+    
+    // Race in progress but < 90 mins — too early for finish, show LIVE and pulse
+    if (elapsed < 5400) {
+      updateStatus("LIVE", C_GREEN);
+      if (lastSentTeam >= 1 && lastSentTeam == currentTeamID)
+        sendToNano(CMD_PULSE);
+      https.end();
+      return;
+    }
+    
+    // 90+ mins past start — now check results properly with date guard
     String today     = getTodayDate();
     String yesterday = getYesterdayDate();
     if (String(resultDate) != today && String(resultDate) != yesterday) {
-      Serial.printf("Results from %s, today %s — skipping\n",
-                    resultDate, today.c_str());
-      updateStatus(raceSunday ? "PRE RACE" : "NO RACE", C_YELLOW);
+      updateStatus("LIVE", C_GREEN); // still racing, Jolpica just hasn't updated
       https.end();
       return;
     }
