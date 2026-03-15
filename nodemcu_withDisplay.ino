@@ -14,7 +14,6 @@
 #define TFT_CS   D2
 #define TFT_DC   D1
 #define TFT_RST  -1
-
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 // ================= SERIAL TO NANO =================
@@ -24,11 +23,11 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
 // ================= WIFI =================
-const char* ssid     = "your wifi ssid";
-const char* password = "your wifi password";
+const char* ssid     = "Your WiFi SSID";
+const char* password = "Your WiFi Password";
 
 // ================= PI SERVER =================
-const char* piHost = "192.168.1.x";   // <-- CHANGE THIS to your Pi's local IP
+const char* piHost = "192.168.1.x";   // <-- CHANGE THIS
 const int   piPort = 5000;
 
 // ================= TIMING =================
@@ -77,12 +76,21 @@ const unsigned long ntpResync    = 1800000;
 #define CMD_LIGHTS_OUT  77
 
 // ================= EEPROM SLOTS =================
-#define EEPROM_LAST_RACE    0
-#define EEPROM_SEASON_CHAMP 2
-#define EEPROM_LAST_GP_NAME 3
+// Slot 0: last race winner team ID (1 byte)
+// Slot 1: last saved mode (1 byte)
+// Slot 2: season champ team ID (1 byte)
+// Slot 3-22: last GP short name (20 bytes)
+// Slot 24-27: last race finish time_t (4 bytes)
+// Slot 31: init flag (1 byte)
+#define EEPROM_LAST_RACE      0
+#define EEPROM_SAVED_MODE     1
+#define EEPROM_SEASON_CHAMP   2
+#define EEPROM_LAST_GP_NAME   3
+#define EEPROM_LAST_RACE_TIME 24
+#define EEPROM_INIT_FLAG      31
+#define EEPROM_MAGIC          0xA5
 
 // ================= TFT COLOR CONSTANTS =================
-#define C_BG        0x0000
 #define C_PANEL     0x0841
 #define C_BORDER    0x2945
 #define C_WHITE     0xFFFF
@@ -93,7 +101,6 @@ const unsigned long ntpResync    = 1800000;
 #define C_DIM       0x4A49
 #define C_BLACK     0x0000
 #define C_ORANGE    0xFB00
-#define C_TEAL      0x0697
 
 // ================= TEAM TFT COLORS =================
 uint16_t teamTFTColor[] = {
@@ -117,31 +124,32 @@ bool nanoReady          = false;
 bool piAvailable        = false;
 unsigned long lastDebounce = 0;
 
-int  currentMode   = MODE_LIVE;
-int  currentRound  = -1;
-int  totalRounds   = 24;
-int  lastSentTeam  = -1;
-int  currentTeamID = TEAM_MCLAREN;
+int    currentMode    = MODE_LIVE;
+int    currentRound   = -1;
+int    totalRounds    = 24;
+int    lastSentTeam   = -1;
+int    currentTeamID  = TEAM_MCLAREN;
+time_t raceStartEpoch = 0;  // always UTC epoch
 
-char raceName[64]   = "---";
+char raceName[64]  = "---";
 char lastGPName[64] = "Australian";
-char p1Team[32]     = "---";
-char p1Status[16]   = "---";
-time_t raceStartEpoch = 0;
+char p1Status[16]  = "LOADING";
 
 // ================= FORWARD DECLARATIONS =================
 void fetchRaceData();
 void fetchRaceDataJolpica();
+bool checkESPNFinished();
 void applyMode(int mode);
 void updateTeamDisplay(int teamID, bool isLive);
 void updateStatus(const char* status, uint16_t color);
 void updateModeDisplay();
 void sendToNano(int cmd);
+bool raceFinishedRecently();
+void checkIfRaceFinishedToday();
 void checkButton();
 void connectWiFi();
 void maintainWiFi();
 void detectNextRace();
-void detectNextRaceJolpica();
 void checkLightsOutCountdown();
 void drawBootScreen();
 void drawStatusLine(const char* msg, uint16_t color);
@@ -151,17 +159,47 @@ void updateClock();
 void updateCountdown();
 void handleRaceFinished(int teamID);
 const char* getModeName(int mode);
+time_t parseUTCEpoch(const char* dateStr, const char* timeStr);
 int getTeamID(String team);
 
 // ==========================================================
-// SETUP
+// UTC EPOCH PARSER
+// Parses Jolpica date "2026-03-29" + time "05:00:00Z" → UTC epoch
+// Uses NO timezone offset — raw UTC so difftime() against time()
+// (which returns UTC internally) is always correct regardless of
+// what configTime() offset is set for display purposes.
 // ==========================================================
+time_t parseUTCEpoch(const char* dateStr, const char* timeStr) {
+  int ry, rm, rd, hh, mm, ss = 0;
+  sscanf(dateStr, "%d-%d-%d", &ry, &rm, &rd);
+  sscanf(timeStr, "%d:%d:%dZ", &hh, &mm, &ss);
 
+  int y = ry, m = rm, d = rd;
+  int days = (y - 1970) * 365;
+  for (int i = 1970; i < y; i++)
+    if ((i % 4 == 0 && i % 100 != 0) || i % 400 == 0) days++;
+  int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+  if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) mdays[1] = 29;
+  for (int i = 0; i < m - 1; i++) days += mdays[i];
+  days += d - 1;
+  return (time_t)days * 86400 + hh * 3600 + mm * 60 + ss;
+}
+
+// ==========================================================
+// SETUP
+// Order: WiFi → NTP → detectNextRace (next GP countdown) →
+//        EEPROM init → checkIfRaceFinishedToday (last.json) →
+//        drawMainScreen → applyMode
+// detectNextRace and checkIfRaceFinishedToday are separate:
+//   detectNextRace  = next.json  → upcoming race, countdown
+//   checkIfRaceFinishedToday = last.json → was today a race?
+// ==========================================================
 void setup() {
   Serial.begin(115200);
+  delay(200); // let ESP boot noise settle before serial output
   nanoSerial.begin(9600);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  EEPROM.begin(32);
+  EEPROM.begin(64);
 
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(1);
@@ -170,23 +208,44 @@ void setup() {
   connectWiFi();
   drawStatusLine("WiFi OK", C_GREEN);
 
+  // configTime sets the IST offset for display (localtime())
+  // time() always returns UTC seconds since epoch — correct for our math
   configTime(19800, 0, "pool.ntp.org");
   drawStatusLine("Syncing time...", C_YELLOW);
-
   time_t now = time(nullptr);
   while (now < 100000) { delay(500); now = time(nullptr); }
   drawStatusLine("Time synced", C_GREEN);
   delay(300);
 
-  detectNextRace();
-  drawStatusLine("Race data OK", C_GREEN);
+  // Upcoming race detection (next.json)
+  for (int attempt = 0; attempt < 3 && raceStartEpoch == 0; attempt++) {
+    if (attempt > 0) { drawStatusLine("Retry...", C_YELLOW); delay(2000); }
+    detectNextRace();
+  }
+  if (raceStartEpoch == 0)
+    drawStatusLine("No race data", C_RED);
+  else
+    drawStatusLine("Race data OK", C_GREEN);
   delay(300);
 
   drawStatusLine("Waiting Nano...", C_YELLOW);
   delay(2000);
   nanoReady = true;
 
-  int savedMode = EEPROM.read(1);
+  // First-time EEPROM initialisation
+  if (EEPROM.read(EEPROM_INIT_FLAG) != EEPROM_MAGIC) {
+    Serial.println("EEPROM first-time init");
+    EEPROM.write(EEPROM_LAST_RACE,    TEAM_MCLAREN);
+    EEPROM.write(EEPROM_SEASON_CHAMP, TEAM_MCLAREN);
+    EEPROM.write(EEPROM_SAVED_MODE,   MODE_LIVE);
+    time_t zero = 0;
+    EEPROM.put(EEPROM_LAST_RACE_TIME, zero);
+    EEPROM.write(EEPROM_INIT_FLAG, EEPROM_MAGIC);
+    EEPROM.commit();
+  }
+
+  // Restore saved state
+  int savedMode = EEPROM.read(EEPROM_SAVED_MODE);
   if (savedMode < 0 || savedMode >= MODE_COUNT) savedMode = MODE_LIVE;
   currentMode = savedMode;
 
@@ -199,14 +258,29 @@ void setup() {
   if (savedGP[0] >= 'A' && savedGP[0] <= 'z')
     strncpy(lastGPName, savedGP, sizeof(lastGPName) - 1);
 
+  // Draw screen first so it doesn't flicker
   drawMainScreen();
   applyMode(currentMode);
+
+  // Now check if race finished today — this may override with FINISHED state
+  // Priority: EEPROM (fast, no API) → last.json (authoritative)
+  if (raceFinishedRecently()) {
+    Serial.println("Boot: race finished recently — using EEPROM");
+    int teamID = EEPROM.read(EEPROM_LAST_RACE);
+    if (teamID < 1 || teamID > 11) teamID = TEAM_MCLAREN;
+    raceSunday   = true;
+    raceFinished = true;
+    lastSentTeam = teamID;
+    updateTeamDisplay(teamID, true);
+    updateStatus("FINISHED", C_GREEN);
+  } else {
+    checkIfRaceFinishedToday();
+  }
 }
 
 // ==========================================================
 // LOOP
 // ==========================================================
-
 void loop() {
   checkButton();
   maintainWiFi();
@@ -238,7 +312,6 @@ void loop() {
 // ==========================================================
 // BOOT SCREEN
 // ==========================================================
-
 void drawBootScreen() {
   tft.fillScreen(C_BLACK);
   tft.fillRect(0, 0, 160, 22, C_RED);
@@ -266,7 +339,6 @@ void drawStatusLine(const char* msg, uint16_t color) {
 // ==========================================================
 // MAIN SCREEN
 // ==========================================================
-
 void drawMainScreen() {
   tft.fillScreen(C_BLACK);
 
@@ -289,9 +361,9 @@ void drawMainScreen() {
   tft.drawRect(4, 29, 156, 44, C_BORDER);
   tft.setTextColor(C_GREY); tft.setTextSize(1);
   tft.setCursor(8, 33);
-  if (currentMode == MODE_DISPLAY)      tft.print("LAST SEASON P1");
-  else if (currentMode == MODE_LIVE)    tft.print("Last GP:");
-  else                                  tft.print("CONSTRUCTOR");
+  if (currentMode == MODE_DISPLAY)   tft.print("LAST SEASON P1");
+  else if (currentMode == MODE_LIVE) tft.print("Last GP:");
+  else                               tft.print("CONSTRUCTOR");
   tft.fillRect(8, 43, 148, 20, C_PANEL);
   tft.setTextColor(teamTFTColor[currentTeamID]); tft.setTextSize(2);
   tft.setCursor(8, 45); tft.print(teamNames[currentTeamID]);
@@ -312,23 +384,22 @@ void drawMainScreen() {
   tft.drawFastHLine(0, 99, 160, C_BORDER);
   tft.setTextColor(C_GREY); tft.setTextSize(1);
   tft.setCursor(4, 103);
-  if (raceFinished)      tft.print("RACE COMPLETE");
-  else if (raceSunday)   tft.print("LIGHTS OUT: --:--:--");
-  else                   tft.print("NO RACE TODAY");
+  if (raceFinished)    tft.print("RACE COMPLETE");
+  else if (raceSunday) tft.print("LIGHTS OUT: --:--:--");
+  else                 tft.print("NO RACE TODAY");
 
   tft.drawFastHLine(0, 112, 160, C_BORDER);
   tft.fillRect(0, 113, 160, 15, C_PANEL);
   tft.setTextColor(C_DIM);
   tft.setCursor(4, 117); tft.print("Rnd ");
   tft.print(currentRound > 0 ? currentRound : 0);
-  tft.setCursor(52, 117);
-  tft.print(piAvailable ? "ESPN+Pi API" : "ESPN API");
+  tft.setCursor(60, 117);
+  tft.print(piAvailable ? "Pi+ESPN" : "Jolpica");
 }
 
 // ==========================================================
-// CLOCK
+// CLOCK — uses localtime() which respects configTime IST offset
 // ==========================================================
-
 void updateClock() {
   time_t now = time(nullptr);
   struct tm* t = localtime(&now);
@@ -341,8 +412,8 @@ void updateClock() {
 
 // ==========================================================
 // COUNTDOWN
+// difftime(raceStartEpoch, time()) — both UTC, always correct
 // ==========================================================
-
 void updateCountdown() {
   time_t now = time(nullptr);
   double diff = difftime(raceStartEpoch, now);
@@ -365,7 +436,6 @@ void updateCountdown() {
 // ==========================================================
 // UPDATE TEAM DISPLAY
 // ==========================================================
-
 void updateTeamDisplay(int teamID, bool isLive) {
   currentTeamID = teamID;
   tft.fillRect(0, 29, 4, 44, teamTFTColor[teamID]);
@@ -393,10 +463,11 @@ void updateTeamDisplay(int teamID, bool isLive) {
 }
 
 // ==========================================================
-// UPDATE STATUS
+// UPDATE STATUS — syncs p1Status so drawMainScreen() never stale
 // ==========================================================
-
 void updateStatus(const char* status, uint16_t color) {
+  strncpy(p1Status, status, sizeof(p1Status) - 1);
+  p1Status[sizeof(p1Status) - 1] = '\0';
   tft.fillRect(52, 74, 106, 11, C_PANEL);
   tft.setTextColor(color); tft.setTextSize(1);
   tft.setCursor(52, 77); tft.print(status);
@@ -405,7 +476,6 @@ void updateStatus(const char* status, uint16_t color) {
 // ==========================================================
 // UPDATE MODE DISPLAY
 // ==========================================================
-
 void updateModeDisplay() {
   tft.fillRect(40, 87, 118, 11, C_PANEL);
   tft.setTextColor(C_WHITE); tft.setTextSize(1);
@@ -415,7 +485,6 @@ void updateModeDisplay() {
 // ==========================================================
 // RACE FINISHED SCREEN
 // ==========================================================
-
 void drawRaceFinished(int teamID) {
   for (int i = 0; i < 3; i++) {
     tft.fillRect(0, 0, 160, 16, C_WHITE); delay(200);
@@ -435,27 +504,24 @@ void drawRaceFinished(int teamID) {
 }
 
 // ==========================================================
-// HANDLE RACE FINISHED (shared logic)
+// HANDLE RACE FINISHED
+// Guard: if already finished, silently return
 // ==========================================================
-
 void handleRaceFinished(int teamID) {
+  if (raceFinished) return;
+
   raceFinished = true;
   lastSentTeam = teamID;
 
   EEPROM.write(EEPROM_LAST_RACE, teamID);
+  time_t now = time(nullptr);
+  EEPROM.put(EEPROM_LAST_RACE_TIME, now);
 
-  // Strip sponsor + " Grand Prix" — save just country name
+  // Strip " Grand Prix" suffix — store clean short name
   char shortGP[21] = {};
   strncpy(shortGP, lastGPName, 20);
-  char* grandPtr = strstr(shortGP, " Grand");
+  char* grandPtr = strstr(shortGP, " Grand Prix");
   if (grandPtr) *grandPtr = '\0';
-  // Strip leading sponsor word e.g. "Heineken Chinese" → "Chinese"
-  char* lastSpace = strrchr(shortGP, ' ');
-  if (lastSpace) {
-    char tmp[21] = {};
-    strncpy(tmp, lastSpace + 1, 20);
-    strncpy(shortGP, tmp, 20);
-  }
   for (int i = 0; i < 20; i++)
     EEPROM.write(EEPROM_LAST_GP_NAME + i, shortGP[i]);
 
@@ -476,7 +542,6 @@ void handleRaceFinished(int teamID) {
 // ==========================================================
 // WIFI
 // ==========================================================
-
 void connectWiFi() {
   Serial.print("Connecting WiFi");
   WiFi.begin(ssid, password);
@@ -490,7 +555,10 @@ void maintainWiFi() {
     if (WiFi.status() != WL_CONNECTED) {
       updateStatus("WiFi Lost", C_RED);
       connectWiFi();
-      updateStatus("WiFi OK", C_GREEN);
+      // Restore last known status
+      tft.fillRect(52, 74, 106, 11, C_PANEL);
+      tft.setTextColor(C_GREEN); tft.setTextSize(1);
+      tft.setCursor(52, 77); tft.print(p1Status);
     }
   }
 }
@@ -498,25 +566,23 @@ void maintainWiFi() {
 // ==========================================================
 // SEND TO NANO
 // ==========================================================
-
 void sendToNano(int cmd) {
   if (!nanoReady) return;
   nanoSerial.print(cmd); nanoSerial.print('\n');
-  Serial.printf("→ Nano: %d\n", cmd);
+  Serial.printf("-> Nano: %d\n", cmd);
 }
 
 // ==========================================================
 // BUTTON
 // ==========================================================
-
 void checkButton() {
   bool state = digitalRead(BUTTON_PIN);
   if (lastButtonState == HIGH && state == LOW) {
     if (millis() - lastDebounce > 300) {
       lastDebounce = millis();
       currentMode = (currentMode + 1) % MODE_COUNT;
-      Serial.printf("Mode → %s\n", getModeName(currentMode));
-      EEPROM.write(1, currentMode); EEPROM.commit();
+      Serial.printf("Mode -> %s\n", getModeName(currentMode));
+      EEPROM.write(EEPROM_SAVED_MODE, currentMode); EEPROM.commit();
       applyMode(currentMode);
     }
   }
@@ -526,9 +592,7 @@ void checkButton() {
 // ==========================================================
 // APPLY MODE
 // ==========================================================
-
 void applyMode(int mode) {
-
   if (mode == MODE_DISPLAY) {
     sendToNano(CMD_DISPLAY);
     int seasonChamp = EEPROM.read(EEPROM_SEASON_CHAMP);
@@ -540,7 +604,6 @@ void applyMode(int mode) {
   }
 
   if (mode == MODE_LIVE) {
-    if (!raceSunday) raceFinished = false;
     lastSentTeam = -1;
 
     int savedTeam = EEPROM.read(EEPROM_LAST_RACE);
@@ -552,17 +615,16 @@ void applyMode(int mode) {
     sendToNano(savedTeam);
     lastSentTeam = savedTeam;
 
-    // Pulse immediately if race is in progress
     time_t now = time(nullptr);
     double elapsed = difftime(now, raceStartEpoch);
     if (raceSunday && !raceFinished && elapsed >= 0)
       sendToNano(CMD_PULSE);
 
-    if (raceSunday && !raceFinished) {
+    if (raceFinished) {
+      updateStatus("FINISHED", C_GREEN);
+    } else if (raceSunday) {
       updateStatus("FETCHING", C_YELLOW);
       fetchRaceData();
-    } else if (raceFinished) {
-      updateStatus("FINISHED", C_GREEN);
     } else {
       updateStatus("NO RACE", C_GREY);
     }
@@ -580,7 +642,6 @@ void applyMode(int mode) {
 // ==========================================================
 // MODE NAME
 // ==========================================================
-
 const char* getModeName(int mode) {
   switch (mode) {
     case MODE_DISPLAY:  return "DISPLAY";
@@ -596,168 +657,127 @@ const char* getModeName(int mode) {
     case MODE_RBULLS:   return "RB";
     case MODE_REDBULL:  return "RED BULL";
     case MODE_WILLIAMS: return "WILLIAMS";
-    default: return "---";
+    default:            return "LIVE";
   }
 }
 
 // ==========================================================
-// RACE DETECTION — ESPN scoreboard (primary)
+// RACE DETECTION — Jolpica next.json
+// Responsibilities: next GP name, raceStartEpoch, raceSunday flag
+// raceStartEpoch is pure UTC epoch from parseUTCEpoch()
+// raceSunday window: -6h to +6h around race start
+// (tight window — finish detection handled separately by last.json)
 // ==========================================================
-
 void detectNextRace() {
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient https;
+  https.begin(client, "https://api.jolpi.ca/ergast/f1/current/next.json");
+  if (https.GET() != 200) { https.end(); return; }
 
-  https.begin(client, "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard");
+  StaticJsonDocument<2048> doc;
+  DeserializationError err = deserializeJson(doc, https.getString());
+  https.end();
+  if (err) return;
 
-  if (https.GET() == 200) {
-    // FIX: filter document large enough for all nested fields
-    StaticJsonDocument<512> filter;
-    filter["events"][0]["id"]                                          = true;
-    filter["events"][0]["name"]                                        = true;
-    filter["events"][0]["endDate"]                                     = true;
-    filter["events"][0]["competitions"][0]["type"]["id"]               = true;
-    filter["events"][0]["competitions"][0]["startDate"]                = true;
-    filter["events"][0]["competitions"][0]["status"]["type"]["name"]   = true;
-    filter["events"][0]["competitions"][0]["status"]["type"]["completed"] = true;
+  const char* totalStr = doc["MRData"]["total"];
+  if (totalStr) totalRounds = atoi(totalStr);
 
-    StaticJsonDocument<4096> doc;
-    DeserializationError err = deserializeJson(
-      doc, https.getStream(),
-      DeserializationOption::Filter(filter)
-    );
+  auto race        = doc["MRData"]["RaceTable"]["Races"][0];
+  const char* name     = race["raceName"];
+  const char* date     = race["date"];
+  const char* timeS    = race["time"];
+  const char* roundStr = race["round"];
 
-    https.end();
+  if (name)     strncpy(raceName, name, sizeof(raceName) - 1);
+  if (roundStr) currentRound = atoi(roundStr);
 
-    if (err) {
-      Serial.printf("ESPN JSON error: %s\n", err.c_str());
-      detectNextRaceJolpica();
-      return;
-    }
+  if (date && timeS) {
+    raceStartEpoch = parseUTCEpoch(date, timeS);
+    time_t now = time(nullptr);
+    double diff = difftime(raceStartEpoch, now);
 
-    auto event = doc["events"][0];
-    if (event.isNull()) {
-      Serial.println("No ESPN events — falling back to Jolpica");
-      detectNextRaceJolpica();
-      return;
-    }
+    // -6h to +6h: covers race day only, no false positives between weekends
+    if (diff >= -21600 && diff <= 43200) raceSunday = true;
 
-    const char* name = event["name"];
-    if (name) strncpy(raceName, name, sizeof(raceName) - 1);
-
-    // Find Race competition (type.id == "3")
-    const char* raceStart     = nullptr;
-    const char* raceStatus    = nullptr;
-    bool        raceCompleted = false;
-
-    for (JsonObject comp : event["competitions"].as<JsonArray>()) {
-      const char* typeId = comp["type"]["id"];
-      if (typeId && String(typeId) == "3") {
-        raceStart     = comp["startDate"];
-        raceStatus    = comp["status"]["type"]["name"];
-        raceCompleted = comp["status"]["type"]["completed"] | false;
-        break;
-      }
-    }
-
-    // Parse race start UTC epoch
-    if (raceStart) {
-      int ry, rm, rd, hh, mm;
-      sscanf(raceStart, "%d-%d-%dT%d:%dZ", &ry, &rm, &rd, &hh, &mm);
-      int y = ry, m = rm, d = rd;
-      int days = (y - 1970) * 365;
-      for (int i = 1970; i < y; i++)
-        if ((i % 4 == 0 && i % 100 != 0) || i % 400 == 0) days++;
-      int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
-      if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) mdays[1] = 29;
-      for (int i = 0; i < m - 1; i++) days += mdays[i];
-      days += d - 1;
-      raceStartEpoch = (time_t)days * 86400 + hh * 3600 + mm * 60;
-    }
-
-    // FIX: race day = now is before event endDate
-    // diffEnd > 0 covers: pre-race, in-progress, and post-race until ESPN moves on
-    const char* endDateStr = event["endDate"];
-    if (endDateStr) {
-      int ry, rm, rd, hh, mm;
-      sscanf(endDateStr, "%d-%d-%dT%d:%dZ", &ry, &rm, &rd, &hh, &mm);
-      int y = ry, m = rm, d = rd;
-      int days = (y - 1970) * 365;
-      for (int i = 1970; i < y; i++)
-        if ((i % 4 == 0 && i % 100 != 0) || i % 400 == 0) days++;
-      int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
-      if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) mdays[1] = 29;
-      for (int i = 0; i < m - 1; i++) days += mdays[i];
-      days += d - 1;
-      time_t endEpoch = (time_t)days * 86400 + hh * 3600 + mm * 60;
-
-      time_t now = time(nullptr);
-      double diffEnd   = difftime(endEpoch, now);
-      double diffStart = difftime(raceStartEpoch, now);
-      // Race weekend: endDate hasn't passed AND race starts within 48h or already started
-      if (diffEnd > 0 && diffStart <= 172800) raceSunday = true;
-    }
-
-    Serial.printf("ESPN Race: %s | raceDay: %s | raceStart diff: %.0f s\n",
-                  raceName, raceSunday ? "YES" : "NO",
-                  difftime(raceStartEpoch, time(nullptr)));
-
-  } else {
-    Serial.println("ESPN failed — falling back to Jolpica");
-    https.end();
-    detectNextRaceJolpica();
+    Serial.printf("Race: %s | Rnd: %d/%d | raceDay: %s | diff: %.0f s\n",
+                  raceName, currentRound, totalRounds,
+                  raceSunday ? "YES" : "NO", diff);
   }
 }
 
 // ==========================================================
-// JOLPICA FALLBACK — race detection
+// CHECK IF RACE ALREADY FINISHED — boot-time check via last.json
+// Runs only if EEPROM doesn't already confirm recent finish
+// Sets raceSunday=true and calls handleRaceFinished() if confirmed
 // ==========================================================
+void checkIfRaceFinishedToday() {
+  Serial.println("Checking last.json for finished race...");
 
-void detectNextRaceJolpica() {
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient https;
-  https.begin(client, "https://api.jolpi.ca/ergast/f1/current/next.json");
-  if (https.GET() == 200) {
-    StaticJsonDocument<2048> doc;
-    deserializeJson(doc, https.getString());
-    const char* totalStr = doc["MRData"]["total"];
-    if (totalStr) totalRounds = atoi(totalStr);
-    auto race        = doc["MRData"]["RaceTable"]["Races"][0];
-    const char* name     = race["raceName"];
-    const char* date     = race["date"];
-    const char* timeS    = race["time"];
-    const char* roundStr = race["round"];
-    if (name)     strncpy(raceName, name, sizeof(raceName) - 1);
-    if (roundStr) currentRound = atoi(roundStr);
-    if (date && timeS) {
-      int ry, rm, rd, hh, mm, ss;
-      sscanf(date,  "%d-%d-%d", &ry, &rm, &rd);
-      sscanf(timeS, "%d:%d:%dZ", &hh, &mm, &ss);
-      int y = ry, m = rm, d = rd;
-      int days = (y - 1970) * 365;
-      for (int i = 1970; i < y; i++)
-        if ((i % 4 == 0 && i % 100 != 0) || i % 400 == 0) days++;
-      int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
-      if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) mdays[1] = 29;
-      for (int i = 0; i < m - 1; i++) days += mdays[i];
-      days += d - 1;
-      raceStartEpoch = (time_t)days * 86400 + hh * 3600 + mm * 60 + ss;
-      time_t now = time(nullptr);
-      double diff = difftime(raceStartEpoch, now);
-      if (diff >= -21600 && diff <= 86400) raceSunday = true;
-      Serial.printf("Jolpica Race: %s | raceDay: %s\n",
-                    raceName, raceSunday ? "YES" : "NO");
-    }
-  }
+  https.begin(client, "https://api.jolpi.ca/ergast/f1/current/last/results.json");
+  if (https.GET() != 200) { https.end(); return; }
+
+  StaticJsonDocument<128> filter;
+  filter["MRData"]["RaceTable"]["Races"][0]["raceName"]                          = true;
+  filter["MRData"]["RaceTable"]["Races"][0]["date"]                              = true;
+  filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["status"]              = true;
+  filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["Constructor"]["name"] = true;
+
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(
+    doc, https.getStream(), DeserializationOption::Filter(filter));
   https.end();
+  if (err) { Serial.printf("checkIfRace err: %s\n", err.c_str()); return; }
+
+  auto race          = doc["MRData"]["RaceTable"]["Races"][0];
+  const char* gpName = race["raceName"];
+  const char* date   = race["date"];
+
+  JsonArray results = race["Results"].as<JsonArray>();
+  if (results.isNull() || results.size() == 0) return;
+
+  const char* team   = results[0]["Constructor"]["name"];
+  const char* status = results[0]["status"];
+  if (!team || !status || !date) return;
+
+  if (String(status) != "Finished") return;
+
+  // Date guard: race date must be today or yesterday (UTC)
+  // Use raceStartEpoch if available, otherwise derive from race date
+  time_t now = time(nullptr);
+  time_t raceDateEpoch = parseUTCEpoch(date, "00:00:00Z");
+  double diff = difftime(now, raceDateEpoch);
+  
+  // Ignore if race older than ~36h
+  if (diff > 129600) return;
+
+  Serial.printf("last.json: race finished, winner: %s\n", team);
+
+  if (gpName) strncpy(lastGPName, gpName, sizeof(lastGPName) - 1);
+  int teamID = getTeamID(String(team));
+
+  // Write EEPROM so next boot uses fast path
+  EEPROM.put(EEPROM_LAST_RACE_TIME, now);
+  EEPROM.write(EEPROM_LAST_RACE, teamID);
+  char shortGP[21] = {};
+  strncpy(shortGP, lastGPName, 20);
+  char* grandPtr = strstr(shortGP, " Grand Prix");
+  if (grandPtr) *grandPtr = '\0';
+  for (int i = 0; i < 20; i++)
+    EEPROM.write(EEPROM_LAST_GP_NAME + i, shortGP[i]);
+  EEPROM.commit();
+
+  raceSunday = true;
+  handleRaceFinished(teamID);
 }
 
 // ==========================================================
 // LIGHTS OUT
+// difftime(raceStartEpoch, time()) — both UTC, always correct
 // ==========================================================
-
 void checkLightsOutCountdown() {
   if (!raceSunday || raceFinished || raceStartEpoch == 0) return;
   time_t now = time(nullptr);
@@ -776,19 +796,60 @@ void checkLightsOutCountdown() {
 }
 
 // ==========================================================
-// FETCH RACE DATA — polls Pi server
+// ESPN FINISHED CHECK
+// Only called after 90 min elapsed during live polling
+// Checks Race competition (type.id=="3") for STATUS_FINAL
 // ==========================================================
+bool checkESPNFinished() {
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient https;
+  https.begin(client, "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard");
+  if (https.GET() != 200) { https.end(); return false; }
 
+  StaticJsonDocument<128> filter;
+  filter["events"][0]["competitions"][0]["type"]["id"]                  = true;
+  filter["events"][0]["competitions"][0]["status"]["type"]["name"]      = true;
+  filter["events"][0]["competitions"][0]["status"]["type"]["completed"] = true;
+
+  StaticJsonDocument<1024> doc;
+  DeserializationError err = deserializeJson(
+    doc, https.getStream(), DeserializationOption::Filter(filter));
+  https.end();
+  if (err) return false;
+
+  for (JsonObject comp : doc["events"][0]["competitions"].as<JsonArray>()) {
+    const char* typeId = comp["type"]["id"];
+    if (typeId && String(typeId) == "3") {
+      bool completed    = comp["status"]["type"]["completed"] | false;
+      const char* sName = comp["status"]["type"]["name"];
+      if (completed || (sName && String(sName) == "STATUS_FINAL")) {
+        Serial.println("ESPN: race FINISHED");
+        return true;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
+// ==========================================================
+// FETCH RACE DATA — Pi primary, ESPN finish at 90min, Jolpica fallback
+// ==========================================================
 void fetchRaceData() {
-  Serial.println("Fetching from Pi...");
+  time_t now     = time(nullptr);
+  double elapsed = difftime(now, raceStartEpoch);
 
-  WiFiClient client;
+  if (elapsed < 0) {
+    updateStatus("PRE RACE", C_YELLOW);
+    return;
+  }
+
+  WiFiClient piClient;
   HTTPClient http;
-
   String url = String("http://") + piHost + ":" + piPort + "/p1";
-  http.begin(client, url);
+  http.begin(piClient, url);
   http.setTimeout(4000);
-
   int code = http.GET();
 
   if (code == 200) {
@@ -796,162 +857,144 @@ void fetchRaceData() {
     DeserializationError err = deserializeJson(doc, http.getString());
     http.end();
 
-    if (err) {
-      Serial.printf("Pi JSON error: %s\n", err.c_str());
-      updateStatus("PI ERR", C_RED);
-      piAvailable = false;
-      return;
-    }
+    if (!err) {
+      piAvailable = true;
+      const char* team   = doc["team"];
+      const char* status = doc["status"];
+      const char* gp     = doc["gp"];
 
-    piAvailable = true;
-    const char* team   = doc["team"];
-    const char* status = doc["status"];
-    const char* gp     = doc["gp"];
+      Serial.printf("Pi -> team:%s status:%s\n",
+                    team ? team : "null", status ? status : "null");
 
-    if (!team || !status) {
-      updateStatus("PI ERR", C_RED);
-      return;
-    }
-
-    Serial.printf("Pi → team: %s | status: %s\n", team, status);
-
-    // FIX: correct GP name stripping
-    if (gp) {
-      strncpy(lastGPName, gp, sizeof(lastGPName) - 1);
-      // Strip " Grand Prix" suffix
-      char* grandPtr = strstr(lastGPName, " Grand");
-      if (grandPtr) *grandPtr = '\0';
-      // Strip leading sponsor word — keep only last word
-      // e.g. "Heineken Chinese" → "Chinese"
-      char* lastSpace = strrchr(lastGPName, ' ');
-      if (lastSpace) {
-        char tmp[64] = {};
-        strncpy(tmp, lastSpace + 1, sizeof(tmp) - 1);
-        strncpy(lastGPName, tmp, sizeof(lastGPName) - 1);
+      if (gp && strlen(gp) > 0) {
+        strncpy(lastGPName, gp, sizeof(lastGPName) - 1);
+        char* grandPtr = strstr(lastGPName, " Grand Prix");
+        if (grandPtr) *grandPtr = '\0';
       }
+
+      if (team && status) {
+        String s = String(status);
+
+        if (s == "finished") {
+          updateTeamDisplay(getTeamID(String(team)), true);
+          handleRaceFinished(getTeamID(String(team)));
+          return;
+        }
+        if (s == "delayed") {
+          updateStatus("RAIN DELAY", C_YELLOW);
+          if (lastSentTeam >= 1) sendToNano(CMD_PULSE);
+          return;
+        }
+        if (s == "cancelled") { updateStatus("CANCELLED", C_RED); return; }
+        if (s == "postponed") { updateStatus("POSTPONED", C_RED); return; }
+
+        if (s == "live") {
+          int teamID = getTeamID(String(team));
+          updateTeamDisplay(teamID, true);
+          if (teamID != lastSentTeam) {
+            sendToNano(teamID);
+            lastSentTeam = teamID;
+          }
+          sendToNano(CMD_PULSE); // keepalive every poll
+          updateStatus("LIVE", C_GREEN);
+
+          if (elapsed >= 5400 && checkESPNFinished()) {
+            fetchRaceDataJolpica();
+          }
+          return;
+        }
+        // "pre" or "none" — fall through to Jolpica
+      }
+    } else {
+      http.end();
     }
-
-    String statusStr = String(status);
-
-    if (statusStr == "pre") {
-      updateStatus("PRE RACE", C_YELLOW);
-      return;
-    }
-
-    if (statusStr == "none") {
-      updateStatus("NO RACE", C_GREY);
-      return;
-    }
-
-    int teamID = getTeamID(String(team));
-    updateTeamDisplay(teamID, true);
-
-    if (statusStr == "finished") {
-      handleRaceFinished(teamID);
-      return;
-    }
-
-    // Live — only send to Nano if team changed
-    if (teamID != lastSentTeam) {
-      sendToNano(teamID);
-      sendToNano(CMD_PULSE);
-      lastSentTeam = teamID;
-    }
-    updateStatus("LIVE", C_GREEN);
-
   } else {
     http.end();
-    Serial.printf("Pi unreachable (HTTP %d) — falling back to Jolpica\n", code);
-    piAvailable = false;
-    fetchRaceDataJolpica();
   }
+
+  piAvailable = false;
+  fetchRaceDataJolpica();
 }
 
 // ==========================================================
-// JOLPICA FALLBACK — race data
+// JOLPICA FALLBACK
 // ==========================================================
-
 void fetchRaceDataJolpica() {
-  Serial.println("Fetching from Jolpica (fallback)...");
+  Serial.println("Jolpica fallback...");
 
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient https;
   https.begin(client, "https://api.jolpi.ca/ergast/f1/current/last/results.json");
+  if (https.GET() != 200) { https.end(); updateStatus("API ERR", C_RED); return; }
 
-  if (https.GET() == 200) {
-    StaticJsonDocument<200> filter;
-    filter["MRData"]["RaceTable"]["Races"][0]["raceName"]                          = true;
-    filter["MRData"]["RaceTable"]["Races"][0]["date"]                              = true;
-    filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["status"]              = true;
-    filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["Constructor"]["name"] = true;
+  StaticJsonDocument<200> filter;
+  filter["MRData"]["RaceTable"]["Races"][0]["raceName"]                          = true;
+  filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["status"]              = true;
+  filter["MRData"]["RaceTable"]["Races"][0]["Results"][0]["Constructor"]["name"] = true;
 
-    StaticJsonDocument<512> doc;
-    DeserializationError err = deserializeJson(
-      doc, https.getStream(), DeserializationOption::Filter(filter));
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(
+    doc, https.getStream(), DeserializationOption::Filter(filter));
+  if (err) { https.end(); updateStatus("J ERR", C_RED); return; }
 
-    if (err) { https.end(); updateStatus("J ERR", C_RED); return; }
+  auto race = doc["MRData"]["RaceTable"]["Races"][0];
+  const char* gpName = race["raceName"];
 
-    auto race              = doc["MRData"]["RaceTable"]["Races"][0];
-    const char* resultDate = race["date"];
-    const char* gpName     = race["raceName"];
-    const char* status     = race["Results"][0]["status"];
-    const char* team       = race["Results"][0]["Constructor"]["name"];
-
-    if (!status || !team || !resultDate) {
-      https.end(); updateStatus("NO DATA", C_GREY); return;
-    }
-
-    time_t now     = time(nullptr);
-    double elapsed = difftime(now, raceStartEpoch);
-
-    if (elapsed < 0) {
-      https.end(); updateStatus("PRE RACE", C_YELLOW); return;
-    }
-    if (elapsed < 5400) {
-      https.end(); updateStatus("LIVE", C_GREEN);
-      if (lastSentTeam >= 1) sendToNano(CMD_PULSE);
-      return;
-    }
-
-    // 90+ min — date guard
-    time_t t2 = now - 86400;
-    struct tm* yt = localtime(&t2);
-    char yesterday[11];
-    sprintf(yesterday, "%04d-%02d-%02d", yt->tm_year+1900, yt->tm_mon+1, yt->tm_mday);
-    struct tm* td = localtime(&now);
-    char today[11];
-    sprintf(today, "%04d-%02d-%02d", td->tm_year+1900, td->tm_mon+1, td->tm_mday);
-
-    if (String(resultDate) != today && String(resultDate) != yesterday) {
-      https.end(); updateStatus("LIVE", C_GREEN); return;
-    }
-
-    if (gpName) strncpy(lastGPName, gpName, sizeof(lastGPName) - 1);
-    int teamID = getTeamID(String(team));
-    updateTeamDisplay(teamID, true);
-
-    if (String(status) == "Finished") {
-      https.end();
-      handleRaceFinished(teamID);
-    } else {
-      if (teamID != lastSentTeam) {
-        sendToNano(teamID); sendToNano(CMD_PULSE);
-        lastSentTeam = teamID;
-      }
-      updateStatus("LIVE", C_GREEN);
-      https.end();
-    }
-  } else {
-    https.end();
-    updateStatus("API ERR", C_RED);
+  JsonArray results = race["Results"].as<JsonArray>();
+  if (results.isNull() || results.size() == 0) {
+    https.end(); updateStatus("NO DATA", C_GREY); return;
   }
+
+  const char* team   = results[0]["Constructor"]["name"];
+  const char* status = results[0]["status"];
+  if (!status || !team) { https.end(); updateStatus("NO DATA", C_GREY); return; }
+
+  https.end();
+
+  time_t now     = time(nullptr);
+  double elapsed = difftime(now, raceStartEpoch);
+
+  if (elapsed < 0) { updateStatus("PRE RACE", C_YELLOW); return; }
+
+  if (elapsed < 5400 && String(status) != "Finished") {
+    updateStatus("LIVE", C_GREEN);
+    sendToNano(CMD_PULSE);
+    return;
+  }
+
+  if (gpName) strncpy(lastGPName, gpName, sizeof(lastGPName) - 1);
+  int teamID = getTeamID(String(team));
+  updateTeamDisplay(teamID, true);
+
+  if (String(status) == "Finished") {
+    handleRaceFinished(teamID);
+  } else {
+    if (teamID != lastSentTeam) { sendToNano(teamID); lastSentTeam = teamID; }
+    sendToNano(CMD_PULSE);
+    updateStatus("LIVE", C_GREEN);
+  }
+}
+
+// ==========================================================
+// RACE FINISHED RECENTLY — fast EEPROM path on boot
+// ==========================================================
+bool raceFinishedRecently() {
+  time_t storedTime;
+  EEPROM.get(EEPROM_LAST_RACE_TIME, storedTime);
+  time_t now = time(nullptr);
+  if (storedTime < 1700000000 || storedTime > now) return false;
+  double diff = difftime(now, storedTime);
+  if (diff < 43200) { // within 12h
+    Serial.println("EEPROM: race finished recently");
+    return true;
+  }
+  return false;
 }
 
 // ==========================================================
 // TEAM IDENTIFICATION
 // ==========================================================
-
 int getTeamID(String team) {
   if (team.indexOf("Ferrari")      >= 0) return TEAM_FERRARI;
   if (team.indexOf("Alpine")       >= 0) return TEAM_ALPINE;
