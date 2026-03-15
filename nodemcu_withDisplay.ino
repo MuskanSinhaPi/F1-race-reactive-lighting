@@ -23,8 +23,8 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
 // ================= WIFI =================
-const char* ssid     = "wifi ssid";
-const char* password = "wifi password";
+const char* ssid     = "Muskan_2.4 G";
+const char* password = "8527245177";
 
 // ================= TIMING =================
 unsigned long lastCheck       = 0;
@@ -206,12 +206,7 @@ void setup() {
     strncpy(lastGPName, savedGP, sizeof(lastGPName) - 1);
 
   drawMainScreen();
-
-  if (raceSunday && currentMode == MODE_LIVE) {
-    fetchRaceData();
-  } else {
-    applyMode(currentMode);
-  }
+  applyMode(currentMode);
 }
 
 // ==========================================================
