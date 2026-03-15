@@ -299,3 +299,102 @@ At T-5 seconds → screen flashes red, sends CMD_LIGHTS_OUT to Nano
 Past start time → shows RACE IN PROGRESS
 Every 2 minutes → fetches results, updates P1 constructor
 Race finishes → checkered wipe, winner shown, RACE COMPLETE
+
+##Free Live Race Data
+
+The cheapest route that actually works for live P1 data is web scraping — scraping a free F1 timing website during the race. No subscription needed.
+Good candidates:
+formula1.com/en/timing — official F1 live timing, free to view in browser
+livetiming.formula1.com — raw F1 timing feed, completely free, no login
+The second one is what FastF1 and MultiViewer both use under the hood. It's a WebSocket feed that F1 exposes publicly — no authentication required. The issue is WebSockets are too complex for an ESP8266, but a Python script on your laptop can connect to it and serve just the P1 constructor over a simple HTTP endpoint.
+Searched the web
+Searched the web
+This is the answer. livetiming.formula1.com requires no authentication at all OpenF1 — it's a completely free, public WebSocket feed that F1 exposes. FastF1 uses it under the hood. You just need a small Python script on your laptop that connects to it and serves P1 constructor over HTTP for the NodeMCU to poll.
+The script would be about 50 lines:
+livetiming.formula1.com (free, no login) 
+  → Python script on laptop (WebSocket listener)
+    → Flask HTTP endpoint at laptop_ip:5000/p1
+      → NodeMCU polls every 30s
+This gives you genuinely real-time P1 data, completely free, no subscription. Want me to write both the Python script and update the NodeMCU fetchRaceData() to use it?
+FastF1 is unreliable for live use because it's designed for post-race analysis. The livetiming.formula1.com WebSocket feed itself is different — it's the raw official F1 live timing feed that FastF1, MultiViewer, and every other F1 timing app pulls from. It's what powers the official F1 app's live timing screen. It's reliable during sessions.
+FastF1 wraps this feed but adds caching, data processing, and analysis features on top — that overhead makes it unreliable for real-time use. A direct WebSocket connection to the feed without FastF1's overhead would be fast and reliable.
+So the chain is:
+livetiming.formula1.com WebSocket (reliable, free, official)
+  → lightweight Python script (just extracts P1 constructor, nothing else)
+    → Flask serves it at laptop_ip:5000/p1
+      → NodeMCU polls every 30s
+The only dependency is your laptop being on during the race with the script running — same requirement as any other laptop-based solution.
+Shall I write it? It would be two files:
+f1_server.py — ~50 lines, runs on your laptop race day only
+Updated fetchRaceData() in NodeMCU — polls laptop for live P1, falls back to Jolpica for finished detection after 90 mins
+can it be written on a raspberry pi 4 model B
+15:04
+Yes, Raspberry Pi 4 Model B is perfect for this — it runs full Linux, has WiFi built in, and can run Python scripts continuously. Even better than a laptop because:
+Stays on permanently, no need to remember to start it on race day
+Sits on your network 24/7
+Low power consumption
+Static IP easy to set
+The setup would be:
+livetiming.formula1.com WebSocket
+  → Python script on Pi 4 (runs as a service, always on)
+    → Flask at pi_ip:5000/p1
+      → NodeMCU polls every 30s
+You'd set a static IP on the Pi so the NodeMCU always knows where to find it, and run the script as a systemd service so it auto-starts on boot and restarts if it crashes.
+Outside of race weekends the script would just return nothing / last known constructor, and the NodeMCU would fall back to Jolpica behavior.
+Shall I write:
+f1_server.py — Python WebSocket + Flask server for the Pi
+f1_server.service — systemd service file so it runs automatically on boot
+Updated fetchRaceData() — NodeMCU polls Pi for live P1 during race, Jolpica for finished check
+so no changes to the nano code, on nodemcu just update the endppoint to that of my raspberry pi's ip address, and no change in wiring- the raspberry pi can run from anywhere and does not need to be physicaly connected to my existing system, right?
+15:08
+Correct on all counts:
+Nano code — no changes
+Wiring — no changes
+NodeMCU — only fetchRaceData() changes to poll the Pi's IP for live P1, everything else stays the same
+Pi — completely separate, just needs to be on the same WiFi network, no physical connection to anything. Could literally be in another room.
+The Pi just needs:
+Power (USB-C)
+WiFi connected to same network as NodeMCU
+Python script running
+That's it. Shall I write the Pi server script and the updated fetchRaceData()?
+I can pol every few seconds too then right? since there's no rate limit? what time is good enough to have it real time but also not strain my nodemcu
+15:20
+Yes, no rate limit since it's your local network. The Pi can handle hundreds of requests per second easily.
+For the NodeMCU the bottleneck is the HTTP request itself — on ESP8266 a local HTTP request takes about 100-300ms. So polling too fast would block the main loop and affect button response, clock updates etc.
+Recommended: 5 seconds
+Fast enough to feel real-time — P1 change shows within 5 seconds
+Slow enough that NodeMCU isn't constantly busy
+Clock still updates every 1 second normally between polls
+Button still responds instantly
+You could go as low as 2-3 seconds but 5 is the sweet spot. F1 position changes mid-race rarely happen faster than that anyway — a proper overtake for P1 takes at least a few seconds to complete.
+So just change:
+cpp
+const unsigned long interval = 30000;  // current
+To:
+cpp
+const unsigned long interval = 5000;   // 5 seconds for Pi local polling
+
+when I try to access the livetiming.formula1.com endpoint from my browser it reads denied
+
+15:26
+Yes that's expected — the live timing feed isn't a regular HTTP endpoint you browse to. It's a SignalR WebSocket connection, not a REST API. Browsers can't just open it directly.
+
+The Python script connects to it properly using the signalr-client or websockets library which handles the WebSocket handshake correctly. FastF1 does exactly this under the hood.
+
+
+Searched the web
+Searched the web
+This is a dealbreaker I found. Since the 2025 Dutch GP, the F1 Live Timing feed no longer freely publishes live position data — driver position is now only available to those with an active F1 TV subscription. 
+Open F1 API
+
+So the free unauthenticated SignalR feed that FastF1 and everything else used is now paywalled for live position data. This happened mid-2025.
+
+Also even before this change, someone building exactly the same thing as you — changing room lights based on race leader — found that the unauthenticated feed was significantly delayed on race day compared to the official timing dashboard. 
+API-Sports
+
+So the honest final answer is:
+
+Free live P1 data — no longer possible without F1 TV
+Jolpica — free, but only updates after race ends, slow
+Your current system — actually the best you can do for free
+The system works great for everything except mid-race P1 updates. That feature simply requires a paid subscription now. Jolpica for the finished detection is the right approach — just have to wait for it to update after the race ends.
