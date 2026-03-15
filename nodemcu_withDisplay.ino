@@ -23,8 +23,8 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
 // ================= WIFI =================
-const char* ssid     = "Your WiFi SSID";
-const char* password = "Your WiFi Password";
+const char* ssid     = "your WiFi SSID";
+const char* password = "your WiFi Password";
 
 // ================= PI SERVER =================
 const char* piHost = "192.168.1.x";   // <-- CHANGE THIS
@@ -118,6 +118,7 @@ const char* teamNames[] = {
 // ================= STATE =================
 bool raceFinished       = false;
 bool raceSunday         = false;
+bool raceCancelled      = false;
 bool lightsOutTriggered = false;
 bool lastButtonState    = HIGH;
 bool nanoReady          = false;
@@ -134,6 +135,7 @@ time_t raceStartEpoch = 0;  // always UTC epoch
 char raceName[64]  = "---";
 char lastGPName[64] = "Australian";
 char p1Status[16]  = "LOADING";
+double lastDiff = 999999;
 
 // ================= FORWARD DECLARATIONS =================
 void fetchRaceData();
@@ -384,10 +386,14 @@ void drawMainScreen() {
   tft.drawFastHLine(0, 99, 160, C_BORDER);
   tft.setTextColor(C_GREY); tft.setTextSize(1);
   tft.setCursor(4, 103);
-  if (raceFinished)    tft.print("RACE COMPLETE");
-  else if (raceSunday) tft.print("LIGHTS OUT: --:--:--");
-  else                 tft.print("NO RACE TODAY");
-
+  if (raceFinished)
+      tft.print("RACE COMPLETE");
+  else if (raceCancelled)
+      tft.print("RACE CANCELLED");
+  else if (raceSunday)
+      tft.print("LIGHTS OUT: --:--:--");
+  else
+      tft.print("NO RACE TODAY");
   tft.drawFastHLine(0, 112, 160, C_BORDER);
   tft.fillRect(0, 113, 160, 15, C_PANEL);
   tft.setTextColor(C_DIM);
@@ -693,12 +699,18 @@ void detectNextRace() {
   if (roundStr) currentRound = atoi(roundStr);
 
   if (date && timeS) {
+    raceCancelled = false;
     raceStartEpoch = parseUTCEpoch(date, timeS);
     time_t now = time(nullptr);
     double diff = difftime(raceStartEpoch, now);
 
-    // -6h to +6h: covers race day only, no false positives between weekends
+    // -6h to +12h: covers race day only, no false positives between weekends
     if (diff >= -21600 && diff <= 43200) raceSunday = true;
+    
+    if (diff > 43200){
+        lightsOutTriggered = false;
+        raceSunday = false;
+    }
 
     Serial.printf("Race: %s | Rnd: %d/%d | raceDay: %s | diff: %.0f s\n",
                   raceName, currentRound, totalRounds,
@@ -782,7 +794,7 @@ void checkLightsOutCountdown() {
   if (!raceSunday || raceFinished || raceStartEpoch == 0) return;
   time_t now = time(nullptr);
   double diff = difftime(raceStartEpoch, now);
-  if (diff <= 10 && diff > -5 && !lightsOutTriggered) {
+  if (!lightsOutTriggered && lastDiff > 0 && diff <= 0) {
     Serial.println("LIGHTS OUT!");
     sendToNano(CMD_LIGHTS_OUT);
     lightsOutTriggered = true;
@@ -793,6 +805,9 @@ void checkLightsOutCountdown() {
     drawMainScreen();
     updateStatus("LIVE", C_GREEN);
   }
+  
+  lastDiff = diff;
+  
 }
 
 // ==========================================================
@@ -885,7 +900,17 @@ void fetchRaceData() {
           if (lastSentTeam >= 1) sendToNano(CMD_PULSE);
           return;
         }
-        if (s == "cancelled") { updateStatus("CANCELLED", C_RED); return; }
+        if (s == "cancelled") { 
+            raceCancelled = true;
+            raceSunday = false;
+            raceFinished = false;
+            lightsOutTriggered = false;
+            updateStatus("CANCELLED", C_RED);
+            drawMainScreen();
+            sendToNano(CMD_DISPLAY);
+            return;
+        }
+    
         if (s == "postponed") { updateStatus("POSTPONED", C_RED); return; }
 
         if (s == "live") {
