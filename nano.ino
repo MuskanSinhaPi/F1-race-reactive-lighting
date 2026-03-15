@@ -25,23 +25,25 @@ bool pulseRising  = true;
 int pulseR = 0, pulseG = 0, pulseB = 0;
 unsigned long lastPulse = 0;
 
-// ================= TEAM COLORS (UPDATED) =================
+// ================= TEAM COLORS =================
 struct Color { int r, g, b; };
 Color teamColors[] = {
   {  0,   0,   0},
-  {220,   0,   0},  // 1 Ferrari
-  {  0,  90, 255},  // 2 Alpine
-  {  0, 100,  60},  // 3 Aston Martin
-  {180, 180, 180},  // 4 Haas (soft white)
-  {160,   0,   0},  // 5 Audi
-  {200, 200, 210},  // 6 Cadillac (soft silver)
-  {255,  95,   0},  // 7 McLaren
-  {  0, 210, 170},  // 8 Mercedes
-  {  0,  70, 200},  // 9 Racing Bulls
+  {220,   0,   0},  // 1  Ferrari
+  {  0,  90, 255},  // 2  Alpine
+  {  0, 100,  60},  // 3  Aston Martin
+  {180, 180, 180},  // 4  Haas (soft white)
+  {160,   0,   0},  // 5  Audi
+  {200, 200, 210},  // 6  Cadillac (soft silver)
+  {255,  95,   0},  // 7  McLaren
+  {  0, 210, 170},  // 8  Mercedes
+  {  0,  70, 200},  // 9  Racing Bulls
   {  0,  20, 120},  // 10 Red Bull (deep navy)
   {  0, 140, 255},  // 11 Williams
 };
 
+// ==========================================================
+// SETUP
 // ==========================================================
 
 void setup() {
@@ -52,37 +54,35 @@ void setup() {
   strip.setBrightness(120);
   strip.show();
 
-  // Default McLaren
+  // Default to McLaren on first boot
   setTeamColor(7);
-  pulsing = true;
 }
 
 // ==========================================================
-  void loop() {
+// LOOP
+// ==========================================================
 
-  // From ESP8266
+void loop() {
+
+  // Commands from NodeMCU
   if (espSerial.available()) {
     String msg = espSerial.readStringUntil('\n');
     msg.trim();
     if (msg.length() == 0) return;
-
     int cmd = msg.toInt();
-    Serial.print("Command Received: ");
+    Serial.print("CMD: ");
     Serial.println(cmd);
-
     handleCommand(cmd);
   }
 
-  // From USB Serial Monitor
+  // Commands from USB Serial Monitor (for testing)
   if (Serial.available()) {
     String msg = Serial.readStringUntil('\n');
     msg.trim();
     if (msg.length() == 0) return;
-
     int cmd = msg.toInt();
-    Serial.print("USB Test Command: ");
+    Serial.print("USB CMD: ");
     Serial.println(cmd);
-
     handleCommand(cmd);
   }
 
@@ -101,6 +101,7 @@ void handleCommand(int cmd) {
   if (cmd == CMD_CHECKERED) {
     pulsing = false;
     checkeredWipe();
+    // Do NOT restore after checkered — wait for NodeMCU to send teamID
     return;
   }
 
@@ -119,34 +120,31 @@ void handleCommand(int cmd) {
 
   if (cmd == CMD_DISPLAY) {
     pulsing = false;
-    smoothFade(200, 200, 190);  // soft white
+    smoothFade(200, 200, 190);  // soft warm white
     strip.setBrightness(150);
+    strip.show();
     return;
   }
 
   if (cmd >= 1 && cmd <= 11) {
+    pulsing = false;  // stop pulsing on any manual/live team command
     setTeamColor(cmd);
   }
 }
 
 // ==========================================================
-// TEAM SETTER WITH CHANGE CHECK
+// TEAM SETTER
 // ==========================================================
 
 void setTeamColor(int team) {
-
-  if (team == currentTeam) return;
+  if (team == currentTeam) return;  // skip if already showing this team
 
   currentTeam = team;
-
   Color c = teamColors[team];
-
   smoothFade(c.r, c.g, c.b);
-
   pulseR = c.r;
   pulseG = c.g;
   pulseB = c.b;
-
   applyAccent(team);
 }
 
@@ -155,25 +153,21 @@ void setTeamColor(int team) {
 // ==========================================================
 
 void applyAccent(int team) {
-
-  if (team == 4) {          // Haas
+  if (team == 4) {          // Haas — red accents
     for (int i = 0; i < NUM_LEDS; i++)
       if (i % 12 == 0)
         strip.setPixelColor(i, strip.Color(220, 0, 0));
   }
-
-  if (team == 6) {          // Cadillac
+  if (team == 6) {          // Cadillac — blue accents
     for (int i = 0; i < NUM_LEDS; i++)
       if (i % 15 == 0)
         strip.setPixelColor(i, strip.Color(100, 150, 255));
   }
-
-  if (team == 10) {         // Red Bull
+  if (team == 10) {         // Red Bull — red accents
     for (int i = 0; i < NUM_LEDS; i++)
       if (i % 20 == 0)
         strip.setPixelColor(i, strip.Color(220, 0, 40));
   }
-
   strip.show();
 }
 
@@ -182,22 +176,16 @@ void applyAccent(int team) {
 // ==========================================================
 
 void smoothFade(int tr, int tg, int tb) {
-
   int steps = 40;
-
   for (int i = 0; i <= steps; i++) {
-
     int r = currentR + (tr - currentR) * i / steps;
     int g = currentG + (tg - currentG) * i / steps;
     int b = currentB + (tb - currentB) * i / steps;
-
     for (int j = 0; j < NUM_LEDS; j++)
       strip.setPixelColor(j, strip.Color(r, g, b));
-
     strip.show();
     delay(15);
   }
-
   currentR = tr;
   currentG = tg;
   currentB = tb;
@@ -208,7 +196,6 @@ void smoothFade(int tr, int tg, int tb) {
 // ==========================================================
 
 void doPulse() {
-
   if (pulseRising) {
     pulseFactor += 0.02;
     if (pulseFactor >= 1.0) pulseRising = false;
@@ -216,14 +203,12 @@ void doPulse() {
     pulseFactor -= 0.02;
     if (pulseFactor <= 0.3) pulseRising = true;
   }
-
   for (int i = 0; i < NUM_LEDS; i++) {
     strip.setPixelColor(i, strip.Color(
       pulseR * pulseFactor,
       pulseG * pulseFactor,
       pulseB * pulseFactor));
   }
-
   strip.show();
 }
 
@@ -232,18 +217,13 @@ void doPulse() {
 // ==========================================================
 
 void lightsOutAnimation() {
-
   for (int i = 5; i > 0; i--) {
-
     Serial.print("Lights Out in: ");
     Serial.println(i);
-
     for (int j = 0; j < NUM_LEDS; j++)
       strip.setPixelColor(j, strip.Color(255, 0, 0));
-
     strip.show();
     delay(300);
-
     strip.clear();
     strip.show();
     delay(700);
@@ -255,7 +235,6 @@ void lightsOutAnimation() {
 // ==========================================================
 
 void checkeredWipe() {
-
   for (int c = 0; c < 12; c++) {
     for (int offset = 0; offset < 8; offset++) {
       for (int i = 0; i < NUM_LEDS; i++) {
@@ -268,7 +247,7 @@ void checkeredWipe() {
       delay(70);
     }
   }
-  currentTeam = -1;
+  currentTeam = -1; // reset so next setTeamColor() always fades correctly
 }
 
 // ==========================================================
