@@ -1,0 +1,17 @@
+[Unit]
+Description=F1 Live LED Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/f1
+ExecStart=/home/pi/f1/venv/bin/python f1_server.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
