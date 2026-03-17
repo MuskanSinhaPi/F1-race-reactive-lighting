@@ -1,500 +1,380 @@
-# F1 Live Leader NeoPixel Display
+# F1 Live Leader Display
 
-## Overview
+An ambient IoT display that tracks live Formula 1 race leadership using a WS2812B LED strip, 1.8" TFT screen, and a three-device architecture.
 
-This project is a standalone embedded IoT ambient display system that visualizes live Formula 1 race leadership using a WS2812B LED strip.
-
-The system uses:
-
-- **NodeMCU (ESP8266)** — WiFi + API + race logic
-- **Arduino Nano** — deterministic LED control
-- **WS2812B NeoPixel strip (1m)** — visual output
-
-During a race:
-- The leading constructor’s color is displayed.
-- Smooth fade transitions occur when P1 changes.
-- A pulse effect runs while race is live.
-- A lights-out countdown animation runs before start.
-- A checkered wipe plays when race finishes.
-- Winner is saved to EEPROM and persists after power loss.
-
-No backend server is required.
-
-**In code, replace your WiFi Credentials
-**Also, replace the number of LEDs
----
-
-# System Architecture
-
-The final production architecture separates networking from LED timing.
-
-```
-WiFi
-  │
-  ▼
-Jolpica F1 API
-  │
-  ▼
-NodeMCU (ESP8266)
-  ├── WiFi + HTTPS
-  ├── JSON parsing
-  ├── Race logic
-  ├── EEPROM (winner + mode)
-  └── Serial commands
-        │
-        ▼
-Arduino Nano
-  ├── Smooth fade
-  ├── Pulse engine
-  ├── Checkered animation
-  ├── Lights-out animation
-  └── Accent rendering
-        │
-        ▼
-WS2812B LED Strip
-```
-
-This design avoids 3.3V logic-level instability by letting the **Nano drive the strip directly at 5V logic**.
-
-NodeMCU:
-
-- 24-hour window race detection (timezone-safe)
-- IST offset fix on raceStartEpoch
-- Countdown on TFT, turns red under 5 minutes
-- Lights out at T-5s
-- 2-minute live polling with date guard
-- Checkered + winner sequence with SSL closed before Nano commands
-- EEPROM persistence for winner, mode, season champ, GP name
-- TFT partial redraws to avoid flicker
-
-Nano:
-
-- Smooth fade between constructors
-- Pulse only during live race
-- currentTeam = -1 reset after checkered so fade always plays
-- if (team == currentTeam) return kept for mid-race efficiency
-- Lights out animation then restore + pulse
-- Accent pixels for Haas, Cadillac, Red Bull
-
-### Walking through all live mode scenarios:
-
-- Non-race day boot: raceSunday = false → applyMode() → sends savedTeam, sets lastSentTeam, shows "NO RACE" 
-
-- Race day boot, pre-race:raceSunday = true, fetchRaceData() called → date guard hits "PRE RACE" → countdown runs on TFT 
-
-- Race day boot, race in progress: fetchRaceData() → date guard passes → sends teamID + pulse → shows "LIVE" → polls every 2 min 
-
-- Race day boot, race already finished: fetchRaceData() → status "Finished" → checkered + winner → raceFinished = true 
-
-- Mode switch to LIVE during race: raceSunday = true, raceFinished = false → fetches immediately 
-
-- Mode switch to LIVE after race finished: raceFinished = true → skips fetch, shows "FINISHED" → no spurious Nano commands 
-
-- Mode switch away and back during race:lastSentTeam = -1 reset on re-entry → next fetch will resend teamID + pulse even if same team 
+During a race, the strip glows in the leading constructor's team colour. Leadership changes trigger smooth fade transitions. The race finish plays a checkered wipe animation, and the Abu Dhabi season finale confirms the WDC constructor champion with a gold celebration sequence.
 
 ---
 
-# Features
+## System Architecture
 
-- Live race leader display
-- Sunday-only race detection (timezone-agnostic; . If the race starts within the next 24 hours, it's race day. Some races like the Americas (Mexico, USA, Brazil) <br> run on a Sunday locally but that's Monday IST.)
-- Smooth fade between constructors
-- Pulse while race status = LIVE
-- Lights-out red countdown animation
-- Checkered wipe on race completion
-- EEPROM persistence (winner + mode)
-- 13-mode manual override system
-- Button debounce using `millis()`
+```
+Internet
+    │
+    ├── Jolpica F1 API  (schedule, standings, results)
+    └── ESPN Scoreboard (live positions, race status)
+              │
+              ▼
+    Raspberry Pi  ──────────────────────────────────────
+    Flask /p1 server                                    │
+    • ESPN live polling (10s)                           │
+    • WDC points projection (final race)                │
+    • Jolpica champion confirmation                     │
+    • Serves JSON over local network                    │
+              │  HTTP                                   │
+              ▼                                         │
+    NodeMCU ESP8266  ←──────── HTTPS (Jolpica fallback)─┘
+    • WiFi + API client
+    • Race phase logic (0–4)
+    • EEPROM persistence
+    • TFT display driver
+    • Serial command dispatcher
+              │  UART
+              ▼
+    Arduino Nano
+    • WS2812B LED timing (800kHz)
+    • Smooth fade engine
+    • Pulse, checkered, lights-out animations
+    • Accent pixel rendering
+              │
+              ▼
+    WS2812B LED Strip  (60–300 LEDs)
+```
+
+The Nano drives the strip at 5V logic, solving the ESP8266's 3.3V logic-level limitation with WS2812B. The Pi handles all heavy computation so the NodeMCU stays responsive.
+
+---
+
+## Features
+
+- Live race P1 constructor display with team colours
+- Smooth colour fade on leadership changes
+- Pulse animation during live race
+- Lights-out countdown animation (T-0 trigger)
+- Checkered wipe on race finish
+- WDC champion confirmation with gold celebration sequence (season finale)
+- TFT shows: live clock, GP name, P1 team, status, mode, countdown, round number
+- 13-mode manual override (button cycles through all constructors)
+- EEPROM persistence — winner and mode survive power loss
+- Boot replay — checkered/champion animation replays on reboot within 12h of race finish
+- Pi-projected champion hint during final race ("WDC LIKELY") before Jolpica confirms
 - Automatic WiFi reconnection
-- LED-optimized team colors
-- Power-safe white levels
-- Accent rendering for Haas, Cadillac, Red Bull
+- NTP time sync with validity guard (epoch > 1,700,000,000)
+- Race phase system (phases 0–4) derived from NTP time vs race start epoch
 
 ---
 
-# Button Mode Cycle (13 Modes)
+## Hardware
 
-| PressMode | Function |
-|-----------|----------|
-| 0 | Display mode (warm white) |
-| 1 | Live race mode |
-| 2 | Ferrari |
-| 3 | Alpine |
-| 4 | Aston Martin |
-| 5 | Haas |
-| 6 | Audi |
-| 7 | Cadillac |
-| 8 | McLaren |
-| 9 | Mercedes |
-| 10 | Racing Bulls |
-| 11 | Red Bull |
-| 12 | Williams |
-| → | Wraps back to 0 |
-
-- Mode is stored in EEPROM slot 1.
-- Last race winner stored in EEPROM slot 0.
+| Component | Notes |
+|-----------|-------|
+| NodeMCU (ESP8266) | WiFi, API, race logic, TFT |
+| Arduino Nano | LED timing, animations |
+| WS2812B LED strip | 60–300 LEDs, 5V |
+| Raspberry Pi (any) | Pi server, same local network |
+| 1.8" SPI TFT (ST7735) | 128×160 pixels |
+| 5V PSU ≥ 4A | For LED strip |
+| 330Ω resistor | Data line protection |
+| 1000µF capacitor | Across LED strip 5V/GND |
+| Push button | Mode cycle |
+| 1kΩ resistor | NodeMCU D8 → Nano RX protection |
 
 ---
 
-# LED-Optimized Team Colors
+## Wiring
 
-| Team | RGB | Notes |
-|------|-----|-------|
-| Ferrari | (220, 0, 0) | Saturated red |
-| Alpine | (0, 90, 255) | Bright blue |
-| Aston Martin | (0, 100, 60) | Racing green |
-| Haas | (180, 180, 180) | Soft white + red accents |
-| Audi | (160, 0, 0) | Deep red |
-| Cadillac | (200, 200, 210) | Silver + blue accents |
-| McLaren | (255, 95, 0) | Papaya orange |
-| Mercedes | (0, 210, 170) | Teal |
-| Racing Bulls | (0, 70, 200) | Bright blue |
-| Red Bull | (0, 20, 120) | Navy + red accents |
-| Williams | (0, 140, 255) | Royal blue |
+### NodeMCU → TFT (ST7735)
 
-White-based teams use reduced intensity to prevent excessive current draw.
+| TFT Pin | NodeMCU Pin |
+|---------|-------------|
+| VCC | 3V3 |
+| GND | GND |
+| LED | 3V3 |
+| SCK | D5 (GPIO14) |
+| SDA (MOSI) | D7 (GPIO13) |
+| CS | D2 (GPIO4) |
+| A0 / DC | D1 (GPIO5) |
+| RESET | — (not connected, use `TFT_RST -1`) |
 
----
+> Connect TFT RESET to 3.3V permanently and set `#define TFT_RST -1` in code. The display resets on power-up. Avoids conflicts with D0 deep-sleep behaviour.
 
-# Hardware Requirements
-
-- NodeMCU (ESP8266)
-- Arduino Nano
-- WS2812B LED strip (60–300 LEDs supported)
-- 5V regulated power supply (≥ 4A for 60 LEDs)
-- 330Ω resistor (data line)
-- 1000µF capacitor across 5V & GND
-- Push button
-- 1kΩ resistor (NodeMCU → Nano RX protection)
-
----
-
-# Wiring
-
-## NodeMCU → Nano (Serial)
+### NodeMCU → Nano (Serial)
 
 ```
-NodeMCU D8 → 1kΩ → Nano D8
-NodeMCU GND → Nano GND
+NodeMCU D8  →  1kΩ  →  Nano D8
+NodeMCU GND →  Nano GND
 ```
 
-## Nano → LED Strip
+### Nano → LED Strip
 
 ```
-Nano D6 → 330Ω → Strip DIN
-Nano 5V → Strip 5V (or external PSU)
-Strip GND → Nano GND
+Nano D6  →  330Ω  →  Strip DIN
+Nano 5V  →  Strip 5V  (or external PSU positive)
+Strip GND  →  Nano GND
 ```
 
-Important:
-- All grounds must be common.
-- Do NOT power Nano through VIN from LED PSU.
-- Power Nano via USB separately.
-- PSU 5V should feed LED strip directly.
+> All grounds must share a common reference.  
+> Do **not** power the Nano through VIN from the LED PSU. Power it separately via USB.  
+> The 5V PSU feeds the LED strip directly.
 
 ---
 
-# Serial Protocol
+## Pin Reference (NodeMCU)
+
+| Pin | Use | Boot-strap note |
+|-----|-----|-----------------|
+| D1 (GPIO5) | TFT DC | Safe |
+| D2 (GPIO4) | TFT CS | Safe |
+| D3 (GPIO0) | Push button | Must be HIGH at boot — button must not be held during power-on |
+| D5 (GPIO14) | TFT SCK | Safe |
+| D6 (GPIO12) | Nano RX | Safe |
+| D7 (GPIO13) | TFT MOSI | Safe |
+| D8 (GPIO15) | Nano TX | Must be LOW at boot — Nano must not drive this HIGH during startup |
+
+---
+
+## Serial Protocol (NodeMCU → Nano)
 
 | Value | Meaning |
 |-------|---------|
-| 0 | Display mode |
-| 1–11 | Team ID |
-| 255 | Pulse |
-| 99 | Checkered |
-| 77 | Lights out |
+| 0 | Display mode (warm white) |
+| 1–11 | Team ID → set colour |
+| 77 | Lights-out animation |
+| 99 | Checkered wipe |
+| 255 | Pulse effect |
 
 ---
 
-# API Used
+## Team IDs and Colours
 
-Jolpica (Ergast-compatible fork):
+| ID | Team | RGB |
+|----|------|-----|
+| 1 | Ferrari | (220, 0, 0) |
+| 2 | Alpine | (0, 90, 255) |
+| 3 | Aston Martin | (0, 100, 60) |
+| 4 | Haas | (180, 180, 180) + red accents |
+| 5 | Audi | (160, 0, 0) |
+| 6 | Cadillac | (200, 200, 210) + blue accents |
+| 7 | McLaren | (255, 95, 0) |
+| 8 | Mercedes | (0, 210, 170) |
+| 9 | Racing Bulls | (0, 70, 200) |
+| 10 | Red Bull | (0, 20, 120) + red accents |
+| 11 | Williams | (0, 140, 255) |
 
-Race results:
-```
-https://api.jolpi.ca/ergast/f1/current/last/results.json
-```
-
-Next race:
-```
-https://api.jolpi.ca/ergast/f1/current/next.json
-```
-
-No API key required.
+White-based teams (Haas, Cadillac) use reduced intensity to limit current draw.
 
 ---
 
-# Troubleshooting
+## Button Mode Cycle
 
-## Symptom: Only First LED Turns On (NodeMCU Direct Drive)
+| Mode | Function |
+|------|----------|
+| 0 | Display mode — shows defending/current WDC champion |
+| 1 | Live race mode |
+| 2–12 | Ferrari → Alpine → Aston Martin → Haas → Audi → Cadillac → McLaren → Mercedes → Racing Bulls → Red Bull → Williams |
 
-Cause: Logic-level mismatch.
+Mode is persisted to EEPROM and restored on boot.
 
-- ESP8266 outputs 3.3V logic
-- WS2812 powered at 5V
-- Required HIGH ≈ 3.5V+
+---
 
-3.3V becomes borderline.
+## TFT Display Layout
 
-When powered from stable 5V supply, failure becomes more obvious.
+```
+┌──────────────────────────────┐
+│ F1 LIVE           HH:MM:SS  │  ← gold header during season end
+├──────────────────────────────┤
+│ Next GP: Abu Dhabi          │  ← "Off season" after final race
+├─┬────────────────────────────┤
+│█│ Last GP: Abu Dhabi | P1:  │  ← label changes by mode/season state
+│█│ McLAREN                   │  ← team name in team colour
+├─┴────────────────────────────┤
+│ STATUS: LIVE                 │
+├──────────────────────────────┤
+│ MODE: LIVE                   │
+├──────────────────────────────┤
+│ LIGHTS OUT: 01:23:45        │  ← countdown, red under 5 min
+├──────────────────────────────┤
+│ Rnd 4/24          Pi+ESPN   │  ← "Jolpica" if Pi unavailable
+└──────────────────────────────┘
+```
 
-### Why Nano Pass-Through Does Not Work
+---
 
-WS2812 uses 800kHz protocol:
+## Race Phase System
 
-- 0 bit ≈ 0.35µs
-- 1 bit ≈ 0.7µs
+The NodeMCU derives all race logic from a single phase value computed against NTP time:
 
-Arduino `digitalRead()` cannot mirror this.
+| Phase | Condition | Behaviour |
+|-------|-----------|-----------|
+| 0 | > 6h before race | Normal week, no polling |
+| 1 | 0–6h before race | Countdown shown |
+| 2 | 0–2h after start | Live polling active |
+| 3 | 2–12h after start | Post-race window, boot replay active |
+| 4 | > 12h after start | Flags reset, idle |
 
-This will NOT work:
+---
+
+## EEPROM Layout
+
+| Bytes | Name | Contents |
+|-------|------|----------|
+| 0 | LAST_RACE | Race winner teamID (1–11) |
+| 1 | SAVED_MODE | Last button mode (0–12) |
+| 2 | SEASON_CHAMP | Confirmed WDC constructor teamID |
+| 3–22 | LAST_GP_NAME | Short GP name string |
+| 24–27 | LAST_RACE_TIME | Epoch of race finish |
+| 28–31 | SEASON_TIME | Epoch of champion confirmation |
+| 32–33 | SEASON_YEAR | Current season year |
+| 34 | INIT_FLAG | Magic byte 0xA5 |
+| 35 | ANIM_PLAYED | Reserved |
+
+All epoch writes are guarded: only written if `time(nullptr) > 1,700,000,000` (NTP must be valid).
+
+---
+
+## Pi Server
+
+The Raspberry Pi runs a Flask server (`f1_server.py`) on port 5000.
+
+**Endpoint: `GET /p1`**
+
+```json
+{
+  "team":   "McLaren",
+  "status": "live",
+  "gp":     "Abu Dhabi Grand Prix"
+}
+```
+
+During the season finale only, two additional fields appear:
+
+```json
+{
+  "team":             "Ferrari",
+  "status":           "live",
+  "gp":               "Abu Dhabi Grand Prix",
+  "champion":         "McLaren",
+  "champion_status":  "projected"
+}
+```
+
+| `champion_status` | Meaning |
+|-------------------|---------|
+| `projected` | Pi's points simulation shows this team will win |
+| `confirmed` | Jolpica standings have updated to the final round |
+
+The NodeMCU shows "WDC LIKELY" on `projected` but only triggers the celebration animation on `confirmed` (from Pi or its own Jolpica poll — whichever arrives first).
+
+**Endpoint: `GET /status`** — debug view of full internal state.
+
+### Pi Setup (quick)
+
+```bash
+mkdir -p /home/pi/f1
+cp f1_server.py /home/pi/f1/
+cd /home/pi/f1
+python3 -m venv venv
+venv/bin/pip install flask requests
+
+# Test
+venv/bin/python f1_server.py
+curl http://localhost:5000/p1
+
+# Install as service
+sudo cp f1server.service /etc/systemd/system/
+sudo systemctl enable --now f1server
+```
+
+See `SETUP.txt` for full instructions including static IP assignment.
+
+---
+
+## APIs Used
+
+| Source | Endpoint | Used for |
+|--------|----------|----------|
+| Jolpica | `/ergast/f1/current/next.json` | Next race schedule, total rounds |
+| Jolpica | `/ergast/f1/current/last/results.json` | Race result on boot |
+| Jolpica | `/ergast/f1/current/driverStandings.json` | WDC champion confirmation |
+| ESPN | `site.api.espn.com/…/f1/scoreboard` | Live positions, race status |
+
+No API keys required.
+
+---
+
+## Firmware Configuration
+
+In `F1_LED_Controller.ino`, update before flashing:
 
 ```cpp
-digitalWrite(6, digitalRead(2));
+const char* ssid     = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+const char* piHost   = "192.168.1.x";   // Pi's local IP
+const int   piPort   = 5000;
 ```
 
-The correct solution is architectural separation:
-- NodeMCU handles networking
-- Nano handles LED timing
+In the Nano sketch, update LED count:
 
-##While uploading to NodeMCU (ESP8266): _A fatal esptool.py error occurred: failed to connect to esp8266: timed out waiting for packet header_
+```cpp
+#define NUM_LEDS  60   // your strip length
+```
 
-_GPIO 0 should be pulled LOW, though a nodeMCU should do this automatically, Reset should stay HIGH, and again the nodeMCU will do an automated reset.
-GPIO15 is pulled down or the board won't work, (also on the board already) Basically you should not have to connect anything special to make it work, and anything that you do connect to any of these pins (+ TX & GPIO 2) may disturb the upload process._
-src: https://forum.arduino.cc/t/a-fatal-esptool-py-error-occurred-failed-to-connect-to-esp8266-timed-out-waiting-for-packet-header/1159116
+### Required Arduino Libraries
+
+| Library | Install via |
+|---------|-------------|
+| Adafruit ST7735 and ST7789 | Arduino Library Manager |
+| Adafruit GFX | Arduino Library Manager |
+| ArduinoJson | Arduino Library Manager |
+| FastLED or Adafruit NeoPixel | Arduino Library Manager |
 
 ---
 
-# Production Deployment Checklist
+## Troubleshooting
 
-## Firmware
+**Only first LED lights up**  
+ESP8266 outputs 3.3V; WS2812B at 5V needs ≥ 3.5V HIGH. Use the Nano as the LED driver — this is already the correct architecture.
 
-- [ ] Button cycles 0–12 correctly
-- [ ] Live mode fetches immediately
-- [ ] Leader change triggers fade
-- [ ] Race finish triggers checkered
-- [ ] Winner stored to EEPROM
+**`failed to connect to esp8266: timed out waiting for packet header`**  
+A peripheral on D3/D8/D4 is likely interfering at boot. Check that the button is not held down, and the Nano is not driving D8 HIGH during startup. See the boot-strap pin table above.
 
-## API
+**NodeMCU shows "Jolpica" not "Pi+ESPN"**  
+Pi server is unreachable. Verify `piHost` IP in the sketch matches `hostname -I` on the Pi. Check `sudo systemctl status f1server`.
 
-- [ ] HTTPS returns 200
-- [ ] JSON parses cleanly
-- [ ] No crashes on network failure
+**`champion_status` stuck at `projected` after race**  
+Jolpica takes 30–60 minutes to update after race end. The Pi polls every 90 seconds; the NodeMCU polls independently every 2 minutes. Both will converge once Jolpica updates.
 
-## Electrical
+**Boot replay animation not playing**  
+`EEPROM_LAST_RACE_TIME` was written with invalid NTP time (near-zero epoch). The sanity guard `storedTime < 1,700,000,000` rejects it. This resolves itself — the next race finish will write a valid epoch.
 
-- [ ] 5V supply ≥ 4A
+**ESP8266 in boot loop**  
+Check boot-strap pin states at power-on. GPIO0 must be HIGH, GPIO15 must be LOW.
+
+---
+
+## Production Checklist
+
+- [ ] WiFi credentials set in firmware
+- [ ] `piHost` IP set and Pi is on static IP
+- [ ] Pi service starts automatically (`systemctl enable f1server`)
+- [ ] Button cycles modes 0–12 correctly
+- [ ] Live mode polls Pi and falls back to Jolpica
+- [ ] Leadership change triggers fade
+- [ ] Race finish triggers checkered animation
+- [ ] Winner stored and survives power cycle
+- [ ] Boot replay fires within 12h of race finish
+- [ ] 5V PSU ≥ 4A
 - [ ] 330Ω data resistor installed
-- [ ] 1000µF capacitor installed
-- [ ] Common ground confirmed
-
-## Stability
-
-- [ ] 30-minute runtime stable
-- [ ] No resets
-- [ ] No flicker
-- [ ] No WiFi drops
-
-## Enclosure
-
-- [ ] Ventilation adequate
-- [ ] Wiring secured
-- [ ] Button stable
-- [ ] Final power test completed
+- [ ] 1000µF capacitor on strip power rails
+- [ ] All grounds common
+- [ ] Nano powered via USB (not from LED PSU VIN)
+- [ ] 30-minute runtime stable, no resets
 
 ---
 
-# Long-Term Reliability
+## Long-Term Notes
 
-- Avoid unregulated adapters
-- Keep firmware backed up
-- Monitor API changes
-- Reboot once per race weekend if desired
-
----
-
-# Project Status
-
-When all checklist items are validated, the system is ready for permanent installation.
-
-# Edit
-
-### 1.8" TFT Display Integration (NodeMCU ESP8266)
-
-This project uses a **1.8" SPI TFT display (ST7735, 128×160)** to show live race information such as session status, leading constructor, and countdown timers.
-
-The display communicates over **SPI**, which is well supported by the ESP8266.
-
----
-
-## Hardware Wiring
-
-| TFT Pin | NodeMCU |
-|--------|---------|
-| VCC | **3V3** |
-| GND | **GND** |
-| LED | **3V3** |
-| SCK | **D5 (GPIO14)** |
-| SDA (MOSI) | **D7 (GPIO13)** |
-| CS | **D2 (GPIO4)** |
-| A0 / DC | **D1 (GPIO5)** |
-| RESET | **RST** or **D0** |
-
-### Required Libraries
-
-Install the following libraries via the Arduino Library Manager:
-
-- `Adafruit ST7735 and ST7789 Library`
-- `Adafruit GFX Library`
-
----
-
-## Display Layout (160×128 Landscape)
-
-```
-┌─────────────────────────────┐
-│ F1 LIVE          HH:MM:SS   │
-├─────────────────────────────┤
-│ Australian Grand Prix       │
-├─┬───────────────────────────┤
-│█│ P1 CONSTRUCTOR            │
-│█│ McLAREN                   │
-├─┴───────────────────────────┤
-│ STATUS: LIVE                │
-├─────────────────────────────┤
-│ MODE: LIVE                  │
-├─────────────────────────────┤
-│ LIGHTS OUT: 01:23:45        │
-├─────────────────────────────┤
-│ Round 4          jolpi.ca   │
-└─────────────────────────────┘
-```
-
-Elements displayed:
-
-- **Header**: live clock and system status
-- **Race title**: current Grand Prix
-- **Team indicator**: colored stripe showing the leading constructor
-- **Status line**: session state (LIVE / COMPLETE / UPCOMING)
-- **Countdown timer**: time until lights out or race completion
-- **Footer**: round number and API source
-
----
-
-## ESP8266 Boot-Strapping Pins
-
-Some ESP8266 pins are **boot-strapping pins**.  
-When the board powers on or resets, the chip briefly reads their voltage levels to determine the **boot mode**.
-
-### Voltage States
-
-| State | Voltage |
-|------|---------|
-| HIGH | ~3.3V |
-| LOW | 0V (GND) |
-
-During the first few milliseconds after startup, these pins must be at specific levels.
-
-### Boot Pin Requirements
-
-| Pin | GPIO | Required State |
-|----|------|---------------|
-| **D3** | GPIO0 | HIGH |
-| **D4** | GPIO2 | HIGH |
-| **D8** | GPIO15 | LOW |
-
-If these conditions are met, the ESP8266 **boots normally from flash memory**.
-
-### What Happens if the States are Wrong
-
-| Condition | Result |
-|----------|--------|
-| GPIO0 LOW | Device enters **programming (flash) mode** |
-| GPIO2 LOW | **Boot failure** |
-| GPIO15 HIGH | **Boot failure** |
-
-Common symptoms include:
-
-- board stuck in reset loop
-- no program execution
-- unusual boot messages on the serial monitor
-
-### Why External Circuits Can Cause Issues
-
-Connecting peripherals to these pins can unintentionally force the wrong voltage level during startup.
-
-Example:
-
-- **Button on D3**  
-  If pressed during boot, GPIO0 becomes LOW → ESP8266 enters flash mode.
-
-- **Device driving D8 HIGH**  
-  GPIO15 must be LOW during boot → the board will fail to start.
-
-### Why NodeMCU Usually Works Anyway
-
-NodeMCU boards include default resistors:
-
-| Pin | Default Pull |
-|----|--------------|
-| GPIO0 | Pull-up |
-| GPIO2 | Pull-up |
-| GPIO15 | Pull-down |
-
-These ensure correct boot behavior **unless external hardware overrides them**.
-
----
-
-## Safe Pins for Peripherals
-
-Recommended pins for most devices:
-
-```
-D1
-D2
-D5
-D6
-D7
-```
-
-Pins that require caution:
-
-```
-D3
-D4
-D8
-```
-
----
-
-## Notes for This Project
-
-Current pin usage:
-
-- **D3 → push button input**
-- **D8 → UART TX from Arduino Nano**
-
-This configuration works provided that:
-
-- the push button is **not pressed during boot**
-- the Arduino Nano **does not drive D8 HIGH during startup**
-
-If the ESP8266 ever becomes stuck in a boot loop, the **first thing to check is the state of these boot-strapping pins**.
-
-### A common issue with NodeMCU + breadboard is that the board is wider than the breadboard center gap.
-
-- You do NOT need to use RST, and you should avoid D0 because it can interfere with deep-sleep/reset behavior.
-- The easiest solution is to use another normal GPIO for RESET and update the pin definition in your code
-
-**Why D4 works
-
-- D4 is a boot-strap pin that must be HIGH during boot, but the TFT reset pin is high-impedance, so it won’t pull the pin low.
-- This is a very common configuration for ST7735 on ESP8266.
-- You can avoid wiring RESET completely and let the library control it internally.
-
-Connect TFT RESET to 3.3V permanently and set:
-```cpp
-#define TFT_RST  -1
-```
-
-This works because the display already resets during power-up.
+- Give the Pi a static DHCP reservation in your router so `piHost` never needs updating
+- Jolpica is an Ergast-compatible community fork — monitor for API changes at the season boundary
+- The system auto-detects new seasons: EEPROM champion and race data are cleared when a new season year is detected from the API
+- Back up your firmware after any working configuration
