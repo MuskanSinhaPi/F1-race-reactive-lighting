@@ -23,22 +23,24 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
 // ================= WIFI =================
-const char* ssid     = "your WiFi SSID";
-const char* password = "your WiFi Password";
+const char* ssid     = "YOUR WIFI SSID";
+const char* password = "YOUR WIFI PASSWORD";
 
 // ================= PI SERVER =================
 const char* piHost = "192.168.1.x";   // <-- CHANGE THIS
 const int   piPort = 5000;
 
 // ================= TIMING =================
-unsigned long lastCheck       = 0;
-unsigned long lastWifiCheck   = 0;
-unsigned long lastClockUpdate = 0;
-unsigned long lastNTPSync     = 0;
-const unsigned long interval     = 5000;
-const unsigned long wifiRetry    = 30000;
-const unsigned long clockRefresh = 1000;
-const unsigned long ntpResync    = 1800000;
+unsigned long lastCheck         = 0;
+unsigned long lastWifiCheck     = 0;
+unsigned long lastClockUpdate   = 0;
+unsigned long lastNTPSync       = 0;
+unsigned long lastChampionPoll  = 0;   // tracks periodic WDC poll after final race
+const unsigned long interval       = 5000;
+const unsigned long wifiRetry      = 30000;
+const unsigned long clockRefresh   = 1000;
+const unsigned long ntpResync      = 1800000;
+const unsigned long championPollMs = 120000; // poll every 2 min until champ confirmed
 
 // ================= TEAM IDs =================
 #define TEAM_FERRARI       1
@@ -76,18 +78,26 @@ const unsigned long ntpResync    = 1800000;
 #define CMD_LIGHTS_OUT  77
 
 // ================= EEPROM SLOTS =================
-// Slot 0: last race winner team ID (1 byte)
-// Slot 1: last saved mode (1 byte)
-// Slot 2: season champ team ID (1 byte)
-// Slot 3-22: last GP short name (20 bytes)
-// Slot 24-27: last race finish time_t (4 bytes)
-// Slot 31: init flag (1 byte)
+// Layout (64 bytes total):
+//  0        EEPROM_LAST_RACE       1 byte  — GP race winner teamID
+//  1        EEPROM_SAVED_MODE      1 byte  — last user mode
+//  2        EEPROM_SEASON_CHAMP    1 byte  — confirmed WDC constructor teamID
+//  3-22     EEPROM_LAST_GP_NAME   20 bytes — short GP name string
+//  24-27    EEPROM_LAST_RACE_TIME  4 bytes — epoch of race finish
+//  28-31    EEPROM_SEASON_TIME     4 bytes — epoch when season was confirmed
+//  32-33    EEPROM_SEASON_YEAR     2 bytes — current season year
+//  34       EEPROM_INIT_FLAG       1 byte  — magic byte
+//  35       EEPROM_ANIM_PLAYED     1 byte  — 0x01 once boot-replay animation has fired
+//                                            cleared on new race/season or after 12h window
 #define EEPROM_LAST_RACE      0
 #define EEPROM_SAVED_MODE     1
 #define EEPROM_SEASON_CHAMP   2
 #define EEPROM_LAST_GP_NAME   3
 #define EEPROM_LAST_RACE_TIME 24
-#define EEPROM_INIT_FLAG      31
+#define EEPROM_SEASON_TIME    28
+#define EEPROM_SEASON_YEAR    32
+#define EEPROM_INIT_FLAG      34
+#define EEPROM_ANIM_PLAYED    35
 #define EEPROM_MAGIC          0xA5
 
 // ================= TFT COLOR CONSTANTS =================
@@ -115,7 +125,7 @@ const char* teamNames[] = {
   "MERCEDES", "RACING BULLS", "RED BULL", "WILLIAMS"
 };
 
-// ================= STATE =================
+// ================= CORE STATE =================
 bool raceFinished       = false;
 bool raceSunday         = false;
 bool raceCancelled      = false;
@@ -123,6 +133,24 @@ bool lightsOutTriggered = false;
 bool lastButtonState    = HIGH;
 bool nanoReady          = false;
 bool piAvailable        = false;
+
+// ================= SEASON STATE =================
+// seasonFinished   — true once the final round race result is saved (race winner known)
+// championConfirmed — true once Jolpica driverStandings returns the NEW season champion
+//                    (this lags by up to ~60 min after the race ends)
+// championTeamID   — the confirmed WDC constructor; 0 = not yet known this session
+// pendingFinalRound — true between final race finish and champion confirmation;
+//                    drives the background polling loop
+bool seasonFinished     = false;
+bool championConfirmed  = false;
+int  championTeamID     = 0;
+bool pendingFinalRound  = false;
+
+// ================= ANIMATION FLAGS =================
+bool raceAnimationPlayedThisBoot    = false;
+bool championAnimationPlayedThisBoot = false;
+bool isBootReplay                   = false;
+
 unsigned long lastDebounce = 0;
 
 int    currentMode    = MODE_LIVE;
@@ -130,33 +158,40 @@ int    currentRound   = -1;
 int    totalRounds    = 24;
 int    lastSentTeam   = -1;
 int    currentTeamID  = TEAM_MCLAREN;
-time_t raceStartEpoch = 0;  // always UTC epoch
+time_t raceStartEpoch = 0;
 
-char raceName[64]  = "---";
+char raceName[64]   = "---";
 char lastGPName[64] = "Australian";
-char p1Status[16]  = "LOADING";
-double lastDiff = 999999;
+char p1Status[16]   = "LOADING";
+double lastDiff     = 999999;
 
 // ================= FORWARD DECLARATIONS =================
 void fetchRaceData();
 void fetchRaceDataJolpica();
 bool checkESPNFinished();
+int  getRacePhase();
 void applyMode(int mode);
 void updateTeamDisplay(int teamID, bool isLive);
 void updateStatus(const char* status, uint16_t color);
 void updateModeDisplay();
 void sendToNano(int cmd);
 bool raceFinishedRecently();
+bool seasonFinishedRecently();
 void checkIfRaceFinishedToday();
+bool tryFetchChampion();           // polls Jolpica driverStandings; returns true when champ confirmed
+void triggerChampionCelebration(int champID); // fires the WDC animation + screen transition
+void saveFinalWDCConstructor();
 void checkButton();
 void connectWiFi();
 void maintainWiFi();
 void detectNextRace();
 void checkLightsOutCountdown();
+void checkChampionPoll();          // called from loop() while pendingFinalRound
 void drawBootScreen();
 void drawStatusLine(const char* msg, uint16_t color);
 void drawMainScreen();
 void drawRaceFinished(int teamID);
+void drawChampionScreen(int champID);
 void updateClock();
 void updateCountdown();
 void handleRaceFinished(int teamID);
@@ -165,17 +200,31 @@ time_t parseUTCEpoch(const char* dateStr, const char* timeStr);
 int getTeamID(String team);
 
 // ==========================================================
+// RACE PHASE
+// Phase 0 — normal week (>6h before race, or no race data)
+// Phase 1 — pre-race countdown (0–6h before race start)
+// Phase 2 — race running (0–2h after race start)
+// Phase 3 — post-race window (2–12h after race start)
+// Phase 4 — weekend over (>12h after race start)
+// ==========================================================
+int getRacePhase() {
+  if (raceStartEpoch == 0) return 0;
+  time_t now = time(nullptr);
+  double diff = difftime(now, raceStartEpoch);
+  if (diff < -21600) return 0;
+  if (diff < 0)      return 1;
+  if (diff < 7200)   return 2;
+  if (diff < 43200)  return 3;
+  return 4;
+}
+
+// ==========================================================
 // UTC EPOCH PARSER
-// Parses Jolpica date "2026-03-29" + time "05:00:00Z" → UTC epoch
-// Uses NO timezone offset — raw UTC so difftime() against time()
-// (which returns UTC internally) is always correct regardless of
-// what configTime() offset is set for display purposes.
 // ==========================================================
 time_t parseUTCEpoch(const char* dateStr, const char* timeStr) {
   int ry, rm, rd, hh, mm, ss = 0;
   sscanf(dateStr, "%d-%d-%d", &ry, &rm, &rd);
   sscanf(timeStr, "%d:%d:%dZ", &hh, &mm, &ss);
-
   int y = ry, m = rm, d = rd;
   int days = (y - 1970) * 365;
   for (int i = 1970; i < y; i++)
@@ -189,16 +238,10 @@ time_t parseUTCEpoch(const char* dateStr, const char* timeStr) {
 
 // ==========================================================
 // SETUP
-// Order: WiFi → NTP → detectNextRace (next GP countdown) →
-//        EEPROM init → checkIfRaceFinishedToday (last.json) →
-//        drawMainScreen → applyMode
-// detectNextRace and checkIfRaceFinishedToday are separate:
-//   detectNextRace  = next.json  → upcoming race, countdown
-//   checkIfRaceFinishedToday = last.json → was today a race?
 // ==========================================================
 void setup() {
   Serial.begin(115200);
-  delay(200); // let ESP boot noise settle before serial output
+  delay(200);
   nanoSerial.begin(9600);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   EEPROM.begin(64);
@@ -210,8 +253,6 @@ void setup() {
   connectWiFi();
   drawStatusLine("WiFi OK", C_GREEN);
 
-  // configTime sets the IST offset for display (localtime())
-  // time() always returns UTC seconds since epoch — correct for our math
   configTime(19800, 0, "pool.ntp.org");
   drawStatusLine("Syncing time...", C_YELLOW);
   time_t now = time(nullptr);
@@ -219,34 +260,32 @@ void setup() {
   drawStatusLine("Time synced", C_GREEN);
   delay(300);
 
-  // Upcoming race detection (next.json)
   for (int attempt = 0; attempt < 3 && raceStartEpoch == 0; attempt++) {
     if (attempt > 0) { drawStatusLine("Retry...", C_YELLOW); delay(2000); }
     detectNextRace();
   }
-  if (raceStartEpoch == 0)
-    drawStatusLine("No race data", C_RED);
-  else
-    drawStatusLine("Race data OK", C_GREEN);
+  drawStatusLine(raceStartEpoch == 0 ? "No race data" : "Race data OK",
+                 raceStartEpoch == 0 ? C_RED : C_GREEN);
   delay(300);
 
   drawStatusLine("Waiting Nano...", C_YELLOW);
   delay(2000);
   nanoReady = true;
 
-  // First-time EEPROM initialisation
   if (EEPROM.read(EEPROM_INIT_FLAG) != EEPROM_MAGIC) {
     Serial.println("EEPROM first-time init");
-    EEPROM.write(EEPROM_LAST_RACE,    TEAM_MCLAREN);
-    EEPROM.write(EEPROM_SEASON_CHAMP, TEAM_MCLAREN);
+    EEPROM.write(EEPROM_LAST_RACE,    TEAM_MERCEDES);
+    EEPROM.write(EEPROM_SEASON_CHAMP, 0);
     EEPROM.write(EEPROM_SAVED_MODE,   MODE_LIVE);
     time_t zero = 0;
     EEPROM.put(EEPROM_LAST_RACE_TIME, zero);
+    EEPROM.put(EEPROM_SEASON_TIME,    zero);
+    int zeroYear = 0;
+    EEPROM.put(EEPROM_SEASON_YEAR, zeroYear);
     EEPROM.write(EEPROM_INIT_FLAG, EEPROM_MAGIC);
     EEPROM.commit();
   }
 
-  // Restore saved state
   int savedMode = EEPROM.read(EEPROM_SAVED_MODE);
   if (savedMode < 0 || savedMode >= MODE_COUNT) savedMode = MODE_LIVE;
   currentMode = savedMode;
@@ -254,29 +293,81 @@ void setup() {
   int savedTeam = EEPROM.read(EEPROM_LAST_RACE);
   if (savedTeam >= 1 && savedTeam <= 11) currentTeamID = savedTeam;
 
+  // Restore champion from EEPROM if season was confirmed this session window.
+  // Require phase >= 3 so we don't re-enter celebration on a mid-week reboot.
+  int storedChamp = EEPROM.read(EEPROM_SEASON_CHAMP);
+  if (storedChamp >= 1 && storedChamp <= 11 && seasonFinishedRecently()) {
+    if (getRacePhase() >= 3) {
+      championTeamID    = storedChamp;
+      championConfirmed = true;
+      seasonFinished    = true;
+      Serial.printf("Boot: champion confirmed from EEPROM: %s\n", teamNames[championTeamID]);
+    }
+  }
+
   char savedGP[21] = {};
   for (int i = 0; i < 20; i++) savedGP[i] = EEPROM.read(EEPROM_LAST_GP_NAME + i);
   savedGP[20] = '\0';
   if (savedGP[0] >= 'A' && savedGP[0] <= 'z')
     strncpy(lastGPName, savedGP, sizeof(lastGPName) - 1);
 
-  // Draw screen first so it doesn't flicker
+  int phase = getRacePhase();
+  if (phase >= 1 && phase <= 3) raceSunday = true;
+  if (phase == 4) {
+    raceSunday = raceFinished = lightsOutTriggered = false;
+  }
+
   drawMainScreen();
   applyMode(currentMode);
 
-  // Now check if race finished today — this may override with FINISHED state
-  // Priority: EEPROM (fast, no API) → last.json (authoritative)
-  if (raceFinishedRecently()) {
-    Serial.println("Boot: race finished recently — using EEPROM");
-    int teamID = EEPROM.read(EEPROM_LAST_RACE);
-    if (teamID < 1 || teamID > 11) teamID = TEAM_MCLAREN;
-    raceSunday   = true;
-    raceFinished = true;
-    lastSentTeam = teamID;
-    updateTeamDisplay(teamID, true);
-    updateStatus("FINISHED", C_GREEN);
-  } else {
-    checkIfRaceFinishedToday();
+  // -------------------------------------------------------
+  // BOOT REPLAY within 12h window — phases 2 and 3
+  // Phase 2: ESP rebooted while race was still running but
+  //          EEPROM shows it finished (e.g. power blip mid-race).
+  // Phase 3: normal post-race reboot window.
+  // -------------------------------------------------------
+  if (phase == 2 || phase == 3) {
+    if (raceFinishedRecently()) {
+      Serial.println("Boot: race finished recently — replaying");
+      int teamID = EEPROM.read(EEPROM_LAST_RACE);
+      if (teamID < 1 || teamID > 11) teamID = TEAM_MCLAREN;
+
+      raceSunday   = true;
+      raceFinished = true;
+      lastSentTeam = teamID;
+      isBootReplay = true;
+
+      updateTeamDisplay(teamID, true);
+      updateStatus("FINISHED", C_GREEN);
+
+      // Race finish animation
+      drawRaceFinished(teamID);
+      sendToNano(CMD_CHECKERED);
+      delay(9000);
+      sendToNano(teamID);
+      delay(500);
+      raceAnimationPlayedThisBoot = true;
+      isBootReplay = false;
+
+      // Restore race result screen
+      drawMainScreen();
+      updateTeamDisplay(teamID, true);
+      updateStatus("FINISHED", C_GREEN);
+
+      // If champion is already confirmed from EEPROM, play champion screen now
+      if (championConfirmed && !championAnimationPlayedThisBoot) {
+        delay(1500);
+        triggerChampionCelebration(championTeamID);
+      } else if (currentRound >= totalRounds) {
+        // Final round but champ not yet confirmed — resume polling
+        pendingFinalRound = true;
+        updateStatus("WDC PENDING", C_YELLOW);
+        Serial.println("Boot: final round, champ not confirmed — resuming poll");
+      }
+
+    } else {
+      checkIfRaceFinishedToday();
+    }
   }
 }
 
@@ -287,6 +378,17 @@ void loop() {
   checkButton();
   maintainWiFi();
   checkLightsOutCountdown();
+  checkChampionPoll();   // no-op unless pendingFinalRound
+
+  if (getRacePhase() == 4) {
+    if (raceFinished || raceSunday || lightsOutTriggered) {
+      Serial.println("Phase 4 — reset race flags");
+      raceFinished       = false;
+      raceSunday         = false;
+      raceCancelled      = false;
+      lightsOutTriggered = false;
+    }
+  }
 
   if (millis() - lastNTPSync > ntpResync) {
     lastNTPSync = millis();
@@ -301,7 +403,8 @@ void loop() {
       updateCountdown();
   }
 
-  if (currentMode == MODE_LIVE && raceSunday && !raceFinished) {
+  int phase = getRacePhase();
+  if (currentMode == MODE_LIVE && (phase == 1 || phase == 2) && !raceFinished) {
     if (millis() - lastCheck > interval) {
       lastCheck = millis();
       fetchRaceData();
@@ -309,6 +412,211 @@ void loop() {
   }
 
   delay(50);
+}
+
+// ==========================================================
+// CHAMPION POLL — called every loop tick, fires every 2 min
+// while pendingFinalRound is true.
+// Once tryFetchChampion() returns true, pendingFinalRound is
+// cleared and triggerChampionCelebration() fires.
+// ==========================================================
+void checkChampionPoll() {
+  if (!pendingFinalRound || championConfirmed) return;
+  if (millis() - lastChampionPoll < championPollMs) return;
+  lastChampionPoll = millis();
+
+  Serial.println("Polling for WDC champion...");
+  updateStatus("WDC CHECK", C_YELLOW);
+
+  if (tryFetchChampion()) {
+    pendingFinalRound = false;
+    // Short pause so the user sees the status change
+    delay(500);
+    triggerChampionCelebration(championTeamID);
+  } else {
+    // Still waiting — restore finished status
+    int raceWinner = EEPROM.read(EEPROM_LAST_RACE);
+    updateTeamDisplay(raceWinner >= 1 ? raceWinner : TEAM_MCLAREN, true);
+    updateStatus("WDC PENDING", C_YELLOW);
+  }
+}
+
+// ==========================================================
+// TRY FETCH CHAMPION
+// Calls Jolpica driverStandings. Returns true only when the
+// standings P1 constructor is DIFFERENT from last season's
+// stored champion OR the season year has already been reset.
+// This avoids triggering on stale data that still shows the
+// previous champion before Jolpica updates.
+//
+// Strategy: compare the returned champion against the value
+// stored in EEPROM_SEASON_CHAMP. If they differ, Jolpica has
+// updated to the new champion. If they're the same as a
+// prior-year winner, we can't tell — so we accept whoever is
+// P1 once the race is confirmed finished.
+// ==========================================================
+bool tryFetchChampion() {
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient https;
+  https.begin(client, "https://api.jolpi.ca/ergast/f1/current/driverStandings.json");
+  if (https.GET() != 200) { https.end(); return false; }
+
+  StaticJsonDocument<128> filter;
+  filter["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"][0]["Constructors"][0]["name"] = true;
+  filter["MRData"]["StandingsTable"]["StandingsLists"][0]["round"] = true;
+
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(
+    doc, https.getStream(), DeserializationOption::Filter(filter));
+  https.end();
+  if (err) return false;
+
+  const char* roundStr =
+    doc["MRData"]["StandingsTable"]["StandingsLists"][0]["round"];
+  const char* constructor =
+    doc["MRData"]["StandingsTable"]["StandingsLists"][0]
+       ["DriverStandings"][0]["Constructors"][0]["name"];
+
+  if (!constructor || !roundStr) return false;
+
+  int standingsRound = atoi(roundStr);
+  int teamID = getTeamID(String(constructor));
+  if (teamID < 1 || teamID > 11) return false;
+
+  // GUARD 1: don't accept stale standings — wait for Jolpica to catch up
+  // to the round that just finished. The "round" field in driverStandings
+  // increments when Jolpica processes results, so this is a reliable
+  // freshness signal that works regardless of totalRounds.
+  if (standingsRound < currentRound) {
+    Serial.printf("Standings still at round %d, need %d — waiting\n",
+                  standingsRound, currentRound);
+    return false;
+  }
+
+  // GUARD 2: don't fire during an active race window (phase 1 or 2).
+  // Standings could theoretically update mid-race for a previous round;
+  // ignore until we're at least in the post-race window (phase >= 3).
+  if (getRacePhase() < 3) {
+    Serial.println("Race phase < 3 — too early to confirm champion");
+    return false;
+  }
+
+  // Both guards passed — standings are fresh and race is over.
+  // seasonFinished is set only if Jolpica confirms this IS the final
+  // round (standingsRound == totalRounds). For mid-season races,
+  // standingsRound == currentRound but totalRounds is higher, so we
+  // clear pendingFinalRound without setting seasonFinished.
+  if (standingsRound < totalRounds) {
+    Serial.printf("Round %d/%d — mid-season, not final. Clearing poll.\n",
+                  standingsRound, totalRounds);
+    pendingFinalRound = false;
+    return false;   // not the final race — no celebration
+  }
+
+  // Standings are current AND this is the final round — confirmed champion
+  championTeamID    = teamID;
+  championConfirmed = true;
+
+  // Persist
+  EEPROM.write(EEPROM_SEASON_CHAMP, teamID);
+  time_t champNow = time(nullptr);
+  if (champNow > 1700000000) {
+    EEPROM.put(EEPROM_SEASON_TIME, champNow);
+  }
+  seasonFinished = true;
+  EEPROM.commit();
+
+  Serial.printf("WDC champion confirmed: %s (standings round %d)\n",
+                teamNames[teamID], standingsRound);
+  return true;
+}
+
+// ==========================================================
+// TRIGGER CHAMPION CELEBRATION
+// Sequence:
+//   1. Flash header + champion screen (season win)
+//   2. Send CMD_CHECKERED then CMD_PULSE in champion colour
+//   3. After 10s return to NORMAL race result screen
+//      (Abu Dhabi P1 constructor / race winner stays displayed)
+//   4. Update header/status to reflect season end
+// applyMode() and mode toggles will always show the race
+// winner in LIVE mode — champion only shown in DISPLAY mode
+// and during this one celebration sequence.
+// ==========================================================
+void triggerChampionCelebration(int champID) {
+  if (championAnimationPlayedThisBoot) return;
+  championAnimationPlayedThisBoot = true;
+
+  Serial.printf("Champion celebration: %s\n", teamNames[champID]);
+
+  // Gold flash
+  for (int i = 0; i < 4; i++) {
+    tft.fillScreen(0xC600); delay(180);
+    tft.fillScreen(C_BLACK); delay(180);
+  }
+
+  // Champion screen
+  drawChampionScreen(champID);
+  sendToNano(CMD_CHECKERED);
+  delay(3000);
+  sendToNano(CMD_PULSE);   // pulse in champion LED colour — Nano maps CMD_PULSE
+  delay(7000);
+
+  // Transition back to race result (Abu Dhabi winner)
+  int raceWinner = EEPROM.read(EEPROM_LAST_RACE);
+  if (raceWinner < 1 || raceWinner > 11) raceWinner = champID;
+
+  // Rebuild main screen with season-end header, but RACE WINNER team shown
+  drawMainScreen();         // redraws with seasonFinished=true header ("F1 SEASON END")
+  updateTeamDisplay(raceWinner, true);   // shows Abu Dhabi P1 — not the champ
+  updateStatus("CHAMPIONS!", C_YELLOW);
+  sendToNano(raceWinner);   // LEDs show race winner colour (stays)
+}
+
+// ==========================================================
+// CHAMPION SCREEN — shown during the celebration window only
+// ==========================================================
+void drawChampionScreen(int champID) {
+  tft.fillScreen(C_BLACK);
+
+  // Gold header
+  tft.fillRect(0, 0, 160, 16, 0xC600);
+  tft.setTextColor(C_WHITE); tft.setTextSize(1);
+  tft.setCursor(4, 4); tft.print("WDC CHAMPION!");
+  updateClock();
+
+  // Champion banner
+  tft.fillRect(0, 18, 160, 60, teamTFTColor[champID]);
+  tft.setTextColor(C_BLACK); tft.setTextSize(1);
+  tft.setCursor(8, 22); tft.print("CONSTRUCTOR CHAMPION");
+  tft.setTextSize(2);
+  // Centre the name
+  int nameLen = strlen(teamNames[champID]);
+  int cx = (160 - nameLen * 12) / 2;
+  if (cx < 4) cx = 4;
+  tft.setCursor(cx, 38); tft.print(teamNames[champID]);
+
+  tft.fillRect(0, 79, 160, 13, C_PANEL);
+  tft.drawFastHLine(0, 79, 160, C_BORDER);
+  tft.setTextColor(C_YELLOW); tft.setTextSize(1);
+  tft.setCursor(4, 83); tft.print("SEASON COMPLETE!");
+
+  tft.fillRect(0, 92, 160, 13, C_PANEL);
+  tft.drawFastHLine(0, 92, 160, C_BORDER);
+  char gpBuf[24];
+  char gpShort[14]; strncpy(gpShort, lastGPName, 13); gpShort[13] = '\0';
+  char* gp = strstr(gpShort, " Grand"); if (gp) *gp = '\0';
+  snprintf(gpBuf, sizeof(gpBuf), "Last GP: %s", gpShort);
+  tft.setTextColor(C_GREY); tft.setCursor(4, 96); tft.print(gpBuf);
+
+  tft.fillRect(0, 106, 160, 22, C_PANEL);
+  tft.drawFastHLine(0, 106, 160, C_BORDER);
+  tft.setTextColor(C_DIM); tft.setTextSize(1);
+  char rndBuf[16];
+  snprintf(rndBuf, sizeof(rndBuf), "Rnd %d/%d FINAL", totalRounds, totalRounds);
+  tft.setCursor(4, 110); tft.print(rndBuf);
+  tft.setCursor(4, 120); tft.print("F1 LED CONTROLLER");
 }
 
 // ==========================================================
@@ -340,21 +648,32 @@ void drawStatusLine(const char* msg, uint16_t color) {
 
 // ==========================================================
 // MAIN SCREEN
+// When seasonFinished: header goes gold, subtitle "Off season",
+// team card label says "<GP> | CHAMPION" — but teamID shown is
+// the RACE WINNER (Abu Dhabi P1), NOT the WDC champ.
+// WDC champ is only shown in DISPLAY mode and during celebration.
 // ==========================================================
 void drawMainScreen() {
   tft.fillScreen(C_BLACK);
 
-  tft.fillRect(0, 0, 160, 16, C_RED);
+  uint16_t headerColor = seasonFinished ? 0xC600 : C_RED;
+  tft.fillRect(0, 0, 160, 16, headerColor);
   tft.setTextColor(C_WHITE); tft.setTextSize(1);
-  tft.setCursor(4, 4); tft.print("F1 LIVE");
+  tft.setCursor(4, 4);
+  tft.print(seasonFinished ? "F1 SEASON END" : "F1 LIVE");
   tft.setCursor(100, 4); tft.print("--:--:--");
 
   tft.fillRect(0, 16, 160, 12, C_PANEL);
   tft.setTextColor(C_GREY); tft.setTextSize(1);
-  tft.setCursor(4, 20); tft.print("Next GP: ");
-  tft.setTextColor(C_WHITE);
-  char shortName[20]; strncpy(shortName, raceName, 19); shortName[19] = '\0';
-  tft.print(shortName);
+  tft.setCursor(4, 20);
+  if (seasonFinished) {
+    tft.print("Off season");
+  } else {
+    tft.print("Next GP: ");
+    tft.setTextColor(C_WHITE);
+    char shortName[20]; strncpy(shortName, raceName, 19); shortName[19] = '\0';
+    tft.print(shortName);
+  }
 
   tft.drawFastHLine(0, 28, 160, C_BORDER);
 
@@ -363,9 +682,24 @@ void drawMainScreen() {
   tft.drawRect(4, 29, 156, 44, C_BORDER);
   tft.setTextColor(C_GREY); tft.setTextSize(1);
   tft.setCursor(8, 33);
-  if (currentMode == MODE_DISPLAY)   tft.print("LAST SEASON P1");
-  else if (currentMode == MODE_LIVE) tft.print("Last GP:");
-  else                               tft.print("CONSTRUCTOR");
+  if (currentMode == MODE_DISPLAY) {
+    if (!seasonFinished && !championConfirmed) {
+      tft.print("DEFENDING CHAMP");
+    } else {
+      tft.print("WDC CONSTRUCTOR");
+    }
+  } else if (seasonFinished) {
+    char label[27];
+    char gpShort[14];
+    strncpy(gpShort, lastGPName, 13); gpShort[13] = '\0';
+    char* gp = strstr(gpShort, " Grand"); if (gp) *gp = '\0';
+    snprintf(label, sizeof(label), "%s | P1:", gpShort);
+    tft.print(label);
+  } else if (currentMode == MODE_LIVE) {
+    tft.print("Last GP:");
+  } else {
+    tft.print("CONSTRUCTOR");
+  }
   tft.fillRect(8, 43, 148, 20, C_PANEL);
   tft.setTextColor(teamTFTColor[currentTeamID]); tft.setTextSize(2);
   tft.setCursor(8, 45); tft.print(teamNames[currentTeamID]);
@@ -374,7 +708,8 @@ void drawMainScreen() {
   tft.drawFastHLine(0, 73, 160, C_BORDER);
   tft.setTextColor(C_GREY); tft.setTextSize(1);
   tft.setCursor(4, 77); tft.print("STATUS:");
-  tft.setTextColor(C_GREEN); tft.setCursor(52, 77); tft.print(p1Status);
+  tft.setTextColor(seasonFinished ? C_YELLOW : C_GREEN);
+  tft.setCursor(52, 77); tft.print(p1Status);
 
   tft.fillRect(0, 86, 160, 13, C_PANEL);
   tft.drawFastHLine(0, 86, 160, C_BORDER);
@@ -386,39 +721,40 @@ void drawMainScreen() {
   tft.drawFastHLine(0, 99, 160, C_BORDER);
   tft.setTextColor(C_GREY); tft.setTextSize(1);
   tft.setCursor(4, 103);
-  if (raceFinished)
-      tft.print("RACE COMPLETE");
-  else if (raceCancelled)
-      tft.print("RACE CANCELLED");
-  else if (raceSunday)
-      tft.print("LIGHTS OUT: --:--:--");
-  else
-      tft.print("NO RACE TODAY");
+  if (seasonFinished)         tft.print("SEASON COMPLETE!");
+  else if (raceFinished)      tft.print("RACE COMPLETE");
+  else if (raceCancelled)     tft.print("RACE CANCELLED");
+  else if (raceSunday)        tft.print("LIGHTS OUT: --:--:--");
+  else                        tft.print("NO RACE TODAY");
+
   tft.drawFastHLine(0, 112, 160, C_BORDER);
   tft.fillRect(0, 113, 160, 15, C_PANEL);
   tft.setTextColor(C_DIM);
-  tft.setCursor(4, 117); tft.print("Rnd ");
-  tft.print(currentRound > 0 ? currentRound : 0);
-  tft.setCursor(60, 117);
+  tft.setCursor(4, 117);
+  char rndBuf[16];
+  snprintf(rndBuf, sizeof(rndBuf), "Rnd %d/%d",
+           currentRound > 0 ? currentRound : 0, totalRounds);
+  tft.print(rndBuf);
+  tft.setCursor(90, 117);
   tft.print(piAvailable ? "Pi+ESPN" : "Jolpica");
 }
 
 // ==========================================================
-// CLOCK — uses localtime() which respects configTime IST offset
+// CLOCK
 // ==========================================================
 void updateClock() {
   time_t now = time(nullptr);
   struct tm* t = localtime(&now);
   char buf[9];
   sprintf(buf, "%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
-  tft.fillRect(96, 1, 63, 14, C_RED);
+  uint16_t headerColor = seasonFinished ? 0xC600 : C_RED;
+  tft.fillRect(96, 1, 63, 14, headerColor);
   tft.setTextColor(C_WHITE); tft.setTextSize(1);
   tft.setCursor(98, 4); tft.print(buf);
 }
 
 // ==========================================================
 // COUNTDOWN
-// difftime(raceStartEpoch, time()) — both UTC, always correct
 // ==========================================================
 void updateCountdown() {
   time_t now = time(nullptr);
@@ -451,13 +787,24 @@ void updateTeamDisplay(int teamID, bool isLive) {
   tft.setTextColor(C_GREY); tft.setTextSize(1);
   tft.setCursor(8, 33);
   if (currentMode == MODE_DISPLAY) {
-    tft.print("LAST SEASON P1");
+    if (!seasonFinished && !championConfirmed) {
+      tft.print("DEFENDING CHAMP");
+    } else {
+      tft.print("WDC CONSTRUCTOR");
+    }
+  } else if (seasonFinished) {
+    // In LIVE mode during off-season, label shows race P1 (last GP)
+    char label[27];
+    char gpShort[14];
+    strncpy(gpShort, lastGPName, 13); gpShort[13] = '\0';
+    char* gp = strstr(gpShort, " Grand"); if (gp) *gp = '\0';
+    snprintf(label, sizeof(label), "%s | P1:", gpShort);
+    tft.print(label);
   } else if (isLive) {
     char label[27];
     char gpShort[14];
     strncpy(gpShort, lastGPName, 13); gpShort[13] = '\0';
-    char* gp = strstr(gpShort, " Grand");
-    if (gp) *gp = '\0';
+    char* gp = strstr(gpShort, " Grand"); if (gp) *gp = '\0';
     snprintf(label, sizeof(label), "Last GP: %s | P1:", gpShort);
     tft.print(label);
   } else {
@@ -469,7 +816,7 @@ void updateTeamDisplay(int teamID, bool isLive) {
 }
 
 // ==========================================================
-// UPDATE STATUS — syncs p1Status so drawMainScreen() never stale
+// UPDATE STATUS
 // ==========================================================
 void updateStatus(const char* status, uint16_t color) {
   strncpy(p1Status, status, sizeof(p1Status) - 1);
@@ -489,7 +836,7 @@ void updateModeDisplay() {
 }
 
 // ==========================================================
-// RACE FINISHED SCREEN
+// RACE FINISHED SCREEN — regular race, not season end
 // ==========================================================
 void drawRaceFinished(int teamID) {
   for (int i = 0; i < 3; i++) {
@@ -511,7 +858,9 @@ void drawRaceFinished(int teamID) {
 
 // ==========================================================
 // HANDLE RACE FINISHED
-// Guard: if already finished, silently return
+// For the final round this sets pendingFinalRound and starts
+// the background champion poll. Animation shows race winner
+// only — no WDC celebration here (champ data not ready yet).
 // ==========================================================
 void handleRaceFinished(int teamID) {
   if (raceFinished) return;
@@ -519,30 +868,50 @@ void handleRaceFinished(int teamID) {
   raceFinished = true;
   lastSentTeam = teamID;
 
-  EEPROM.write(EEPROM_LAST_RACE, teamID);
-  time_t now = time(nullptr);
-  EEPROM.put(EEPROM_LAST_RACE_TIME, now);
+  if (!isBootReplay) {
+    EEPROM.write(EEPROM_LAST_RACE, teamID);
+    time_t now = time(nullptr);
+    EEPROM.put(EEPROM_LAST_RACE_TIME, now);
 
-  // Strip " Grand Prix" suffix — store clean short name
-  char shortGP[21] = {};
-  strncpy(shortGP, lastGPName, 20);
-  char* grandPtr = strstr(shortGP, " Grand Prix");
-  if (grandPtr) *grandPtr = '\0';
-  for (int i = 0; i < 20; i++)
-    EEPROM.write(EEPROM_LAST_GP_NAME + i, shortGP[i]);
+    char shortGP[21] = {};
+    strncpy(shortGP, lastGPName, 20);
+    char* grandPtr = strstr(shortGP, " Grand Prix");
+    if (grandPtr) *grandPtr = '\0';
+    for (int i = 0; i < 20; i++)
+      EEPROM.write(EEPROM_LAST_GP_NAME + i, shortGP[i]);
 
-  if (currentRound == totalRounds) {
-    EEPROM.write(EEPROM_SEASON_CHAMP, teamID);
-    Serial.printf("Season champion saved: %s\n", teamNames[teamID]);
+    EEPROM.commit();
   }
-  EEPROM.commit();
 
   updateStatus("FINISHED", C_GREEN);
-  drawRaceFinished(teamID);
-  sendToNano(CMD_CHECKERED);
-  delay(9000);
-  sendToNano(teamID);
-  delay(500);
+
+  // Race finish animation
+  if (!raceAnimationPlayedThisBoot) {
+    drawRaceFinished(teamID);
+    sendToNano(CMD_CHECKERED);
+    delay(9000);
+    sendToNano(teamID);
+    delay(500);
+    raceAnimationPlayedThisBoot = true;
+
+    drawMainScreen();
+    updateTeamDisplay(teamID, true);
+    updateStatus("FINISHED", C_GREEN);
+  }
+
+  // Always poll after every race finish.
+  // tryFetchChampion() uses the standings "round" field to confirm
+  // freshness — no totalRounds comparison needed here.
+  // For mid-season races: pendingFinalRound is set, first poll fires,
+  // standingsRound == currentRound so freshness passes, but Jolpica
+  // won't set seasonFinished because the season isn't over — poll clears.
+  // For the final race: same path, but once Jolpica updates it triggers
+  // the celebration automatically.
+  if (!championConfirmed && currentRound >= totalRounds) {
+    pendingFinalRound = true;
+    lastChampionPoll  = 0;  // fire first poll promptly
+    Serial.println("Race finished — champion poll started (standings will decide)");
+  }
 }
 
 // ==========================================================
@@ -561,7 +930,6 @@ void maintainWiFi() {
     if (WiFi.status() != WL_CONNECTED) {
       updateStatus("WiFi Lost", C_RED);
       connectWiFi();
-      // Restore last known status
       tft.fillRect(52, 74, 106, 11, C_PANEL);
       tft.setTextColor(C_GREEN); tft.setTextSize(1);
       tft.setCursor(52, 77); tft.print(p1Status);
@@ -597,14 +965,22 @@ void checkButton() {
 
 // ==========================================================
 // APPLY MODE
+// LIVE mode: always shows race winner (Abu Dhabi P1), NOT WDC champ
+// DISPLAY mode: shows WDC constructor champion (from EEPROM)
+// No animation is ever triggered here.
 // ==========================================================
 void applyMode(int mode) {
   if (mode == MODE_DISPLAY) {
     sendToNano(CMD_DISPLAY);
-    int seasonChamp = EEPROM.read(EEPROM_SEASON_CHAMP);
-    if (seasonChamp < 1 || seasonChamp > 11) seasonChamp = TEAM_MCLAREN;
-    updateTeamDisplay(seasonChamp, false);
-    updateStatus("DISPLAY", C_GREY);
+    // Show confirmed WDC champion, or last known if pending
+    int dispChamp = championConfirmed ? championTeamID : EEPROM.read(EEPROM_SEASON_CHAMP);
+    if (dispChamp < 1 || dispChamp > 11) dispChamp = TEAM_MCLAREN;
+    updateTeamDisplay(dispChamp, false);
+    if (!seasonFinished && !championConfirmed) {
+      updateStatus("DEFENDING", C_YELLOW);
+    } else {
+      updateStatus("CHAMPIONS!", C_YELLOW);
+    }
     updateModeDisplay();
     return;
   }
@@ -612,32 +988,36 @@ void applyMode(int mode) {
   if (mode == MODE_LIVE) {
     lastSentTeam = -1;
 
-    int savedTeam = EEPROM.read(EEPROM_LAST_RACE);
-    if (savedTeam < 1 || savedTeam > 11) savedTeam = TEAM_MCLAREN;
-    currentTeamID = savedTeam;
+    // Always show race winner in LIVE mode
+    int raceWinner = EEPROM.read(EEPROM_LAST_RACE);
+    if (raceWinner < 1 || raceWinner > 11) raceWinner = TEAM_MCLAREN;
+    currentTeamID = raceWinner;
 
-    updateTeamDisplay(savedTeam, true);
+    updateTeamDisplay(raceWinner, true);
     updateModeDisplay();
-    sendToNano(savedTeam);
-    lastSentTeam = savedTeam;
+    sendToNano(raceWinner);
+    lastSentTeam = raceWinner;
 
-    time_t now = time(nullptr);
-    double elapsed = difftime(now, raceStartEpoch);
-    if (raceSunday && !raceFinished && elapsed >= 0)
+    int phase = getRacePhase();
+    if (phase == 2 && !raceFinished)
       sendToNano(CMD_PULSE);
 
     if (raceFinished) {
-      updateStatus("FINISHED", C_GREEN);
+      updateStatus(pendingFinalRound ? "WDC PENDING" :
+                   seasonFinished    ? "CHAMPIONS!"  : "FINISHED",
+                   pendingFinalRound ? C_YELLOW :
+                   seasonFinished    ? C_YELLOW : C_GREEN);
     } else if (raceSunday) {
       updateStatus("FETCHING", C_YELLOW);
       fetchRaceData();
     } else {
-      updateStatus("NO RACE", C_GREY);
+      updateStatus(seasonFinished ? "OFF SEASON" : "NO RACE",
+                   seasonFinished ? C_YELLOW : C_GREY);
     }
     return;
   }
 
-  // Manual team modes
+  // Team modes
   int teamID = mode - 1;
   sendToNano(teamID);
   updateTeamDisplay(teamID, false);
@@ -669,10 +1049,6 @@ const char* getModeName(int mode) {
 
 // ==========================================================
 // RACE DETECTION — Jolpica next.json
-// Responsibilities: next GP name, raceStartEpoch, raceSunday flag
-// raceStartEpoch is pure UTC epoch from parseUTCEpoch()
-// raceSunday window: -6h to +6h around race start
-// (tight window — finish detection handled separately by last.json)
 // ==========================================================
 void detectNextRace() {
   WiFiClientSecure client;
@@ -689,6 +1065,30 @@ void detectNextRace() {
   const char* totalStr = doc["MRData"]["total"];
   if (totalStr) totalRounds = atoi(totalStr);
 
+  const char* seasonStr = doc["MRData"]["RaceTable"]["season"];
+  int apiSeason = seasonStr ? atoi(seasonStr) : 0;
+  int storedSeason = 0;
+  EEPROM.get(EEPROM_SEASON_YEAR, storedSeason);
+
+  if (apiSeason > 2000 && apiSeason != storedSeason) {
+    Serial.printf("New season: %d -> %d\n", storedSeason, apiSeason);
+    EEPROM.put(EEPROM_SEASON_YEAR, apiSeason);
+    EEPROM.write(EEPROM_SEASON_CHAMP, 0);
+    EEPROM.write(EEPROM_LAST_RACE, 0);
+    time_t zero = 0;
+    EEPROM.put(EEPROM_SEASON_TIME, zero);
+    EEPROM.commit();
+    raceFinished                     = false;
+    raceCancelled                    = false;
+    lightsOutTriggered               = false;
+    seasonFinished                   = false;
+    championConfirmed                = false;
+    championTeamID                   = 0;
+    pendingFinalRound                = false;
+    raceAnimationPlayedThisBoot      = false;
+    championAnimationPlayedThisBoot  = false;
+  }
+
   auto race        = doc["MRData"]["RaceTable"]["Races"][0];
   const char* name     = race["raceName"];
   const char* date     = race["date"];
@@ -699,32 +1099,43 @@ void detectNextRace() {
   if (roundStr) currentRound = atoi(roundStr);
 
   if (date && timeS) {
-    raceCancelled = false;
     raceStartEpoch = parseUTCEpoch(date, timeS);
-    time_t now = time(nullptr);
-    double diff = difftime(raceStartEpoch, now);
 
-    // -6h to +12h: covers race day only, no false positives between weekends
-    if (diff >= -21600 && diff <= 43200) raceSunday = true;
-    
-    if (diff > 43200){
-        lightsOutTriggered = false;
-        raceSunday = false;
+    int phase = getRacePhase();
+    raceSunday = (phase >= 1 && phase <= 3);
+
+    if (phase == 4) {
+      raceFinished       = false;
+      raceCancelled      = false;
+      lightsOutTriggered = false;
+      raceSunday         = false;
     }
 
-    Serial.printf("Race: %s | Rnd: %d/%d | raceDay: %s | diff: %.0f s\n",
+    static int lastRoundSeen = -1;
+    if (currentRound > 0 && currentRound != lastRoundSeen) {
+      if (lastRoundSeen != -1) {
+        raceFinished                    = false;
+        raceCancelled                   = false;
+        lightsOutTriggered              = false;
+        raceAnimationPlayedThisBoot     = false;
+        championAnimationPlayedThisBoot = false;
+        pendingFinalRound               = false;
+        Serial.printf("Round %d->%d reset\n", lastRoundSeen, currentRound);
+      }
+      lastRoundSeen = currentRound;
+    }
+
+    Serial.printf("Race: %s | Rnd: %d/%d | phase: %d | raceDay: %s\n",
                   raceName, currentRound, totalRounds,
-                  raceSunday ? "YES" : "NO", diff);
+                  phase, raceSunday ? "YES" : "NO");
   }
 }
 
 // ==========================================================
-// CHECK IF RACE ALREADY FINISHED — boot-time check via last.json
-// Runs only if EEPROM doesn't already confirm recent finish
-// Sets raceSunday=true and calls handleRaceFinished() if confirmed
+// CHECK IF RACE ALREADY FINISHED — boot-time via last.json
 // ==========================================================
 void checkIfRaceFinishedToday() {
-  Serial.println("Checking last.json for finished race...");
+  Serial.println("Checking last.json...");
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -747,37 +1158,51 @@ void checkIfRaceFinishedToday() {
   auto race          = doc["MRData"]["RaceTable"]["Races"][0];
   const char* gpName = race["raceName"];
   const char* date   = race["date"];
-
-  JsonArray results = race["Results"].as<JsonArray>();
+  JsonArray results  = race["Results"].as<JsonArray>();
   if (results.isNull() || results.size() == 0) return;
 
   const char* team   = results[0]["Constructor"]["name"];
   const char* status = results[0]["status"];
   if (!team || !status || !date) return;
-
   if (String(status) != "Finished") return;
+  if (raceFinished) return;
 
-  // Date guard: race date must be today or yesterday (UTC)
-  // Use raceStartEpoch if available, otherwise derive from race date
-  time_t now = time(nullptr);
+  // GP dedup guard
+  char storedGP[21] = {};
+  for (int i = 0; i < 20; i++) storedGP[i] = EEPROM.read(EEPROM_LAST_GP_NAME + i);
+  storedGP[20] = '\0';
+
+  char apiGPStripped[64] = {};
+  if (gpName) {
+    strncpy(apiGPStripped, gpName, sizeof(apiGPStripped) - 1);
+    char* gp = strstr(apiGPStripped, " Grand Prix"); if (gp) *gp = '\0';
+    char* sp = strrchr(apiGPStripped, ' ');
+    if (sp) memmove(apiGPStripped, sp + 1, strlen(sp + 1) + 1);
+  }
+  if (strlen(storedGP) > 0 && strcmp(apiGPStripped, storedGP) == 0) {
+    Serial.println("Same GP as stored — skipping");
+    return;
+  }
+
+  // Date guard — reject if older than 36h
+  time_t now           = time(nullptr);
   time_t raceDateEpoch = parseUTCEpoch(date, "00:00:00Z");
-  double diff = difftime(now, raceDateEpoch);
-  
-  // Ignore if race older than ~36h
-  if (diff > 129600) return;
+  if (difftime(now, raceDateEpoch) > 129600) return;
 
-  Serial.printf("last.json: race finished, winner: %s\n", team);
+  Serial.printf("last.json: finished, winner: %s\n", team);
 
   if (gpName) strncpy(lastGPName, gpName, sizeof(lastGPName) - 1);
   int teamID = getTeamID(String(team));
 
-  // Write EEPROM so next boot uses fast path
-  EEPROM.put(EEPROM_LAST_RACE_TIME, now);
+  if (now > 1700000000) {
+    EEPROM.put(EEPROM_LAST_RACE_TIME, now);
+  }
   EEPROM.write(EEPROM_LAST_RACE, teamID);
   char shortGP[21] = {};
   strncpy(shortGP, lastGPName, 20);
-  char* grandPtr = strstr(shortGP, " Grand Prix");
-  if (grandPtr) *grandPtr = '\0';
+  char* grandPtr = strstr(shortGP, " Grand Prix"); if (grandPtr) *grandPtr = '\0';
+  char* sp = strrchr(shortGP, ' ');
+  if (sp) memmove(shortGP, sp + 1, strlen(sp + 1) + 1);
   for (int i = 0; i < 20; i++)
     EEPROM.write(EEPROM_LAST_GP_NAME + i, shortGP[i]);
   EEPROM.commit();
@@ -787,8 +1212,7 @@ void checkIfRaceFinishedToday() {
 }
 
 // ==========================================================
-// LIGHTS OUT
-// difftime(raceStartEpoch, time()) — both UTC, always correct
+// LIGHTS OUT — zero-crossing trigger
 // ==========================================================
 void checkLightsOutCountdown() {
   if (!raceSunday || raceFinished || raceStartEpoch == 0) return;
@@ -805,15 +1229,11 @@ void checkLightsOutCountdown() {
     drawMainScreen();
     updateStatus("LIVE", C_GREEN);
   }
-  
   lastDiff = diff;
-  
 }
 
 // ==========================================================
 // ESPN FINISHED CHECK
-// Only called after 90 min elapsed during live polling
-// Checks Race competition (type.id=="3") for STATUS_FINAL
 // ==========================================================
 bool checkESPNFinished() {
   WiFiClientSecure client;
@@ -849,16 +1269,13 @@ bool checkESPNFinished() {
 }
 
 // ==========================================================
-// FETCH RACE DATA — Pi primary, ESPN finish at 90min, Jolpica fallback
+// FETCH RACE DATA
 // ==========================================================
 void fetchRaceData() {
   time_t now     = time(nullptr);
   double elapsed = difftime(now, raceStartEpoch);
 
-  if (elapsed < 0) {
-    updateStatus("PRE RACE", C_YELLOW);
-    return;
-  }
+  if (elapsed < 0) { updateStatus("PRE RACE", C_YELLOW); return; }
 
   WiFiClient piClient;
   HTTPClient http;
@@ -868,18 +1285,21 @@ void fetchRaceData() {
   int code = http.GET();
 
   if (code == 200) {
-    StaticJsonDocument<256> doc;
+    StaticJsonDocument<384> doc;
     DeserializationError err = deserializeJson(doc, http.getString());
     http.end();
 
     if (!err) {
       piAvailable = true;
-      const char* team   = doc["team"];
-      const char* status = doc["status"];
-      const char* gp     = doc["gp"];
+      const char* team    = doc["team"];
+      const char* status  = doc["status"];
+      const char* gp      = doc["gp"];
+      const char* champ   = doc["champion"];        // Pi-projected WDC constructor
+      const char* cStatus = doc["champion_status"]; // "projected" or "confirmed"
 
-      Serial.printf("Pi -> team:%s status:%s\n",
-                    team ? team : "null", status ? status : "null");
+      Serial.printf("Pi -> team:%s status:%s champ:%s(%s)\n",
+                    team ? team : "null", status ? status : "null",
+                    champ ? champ : "none", cStatus ? cStatus : "-");
 
       if (gp && strlen(gp) > 0) {
         strncpy(lastGPName, gp, sizeof(lastGPName) - 1);
@@ -889,10 +1309,36 @@ void fetchRaceData() {
 
       if (team && status) {
         String s = String(status);
-
         if (s == "finished") {
-          updateTeamDisplay(getTeamID(String(team)), true);
-          handleRaceFinished(getTeamID(String(team)));
+          int raceWinnerID = getTeamID(String(team));
+          updateTeamDisplay(raceWinnerID, true);
+          handleRaceFinished(raceWinnerID);
+
+          // If Pi already confirmed the champion at finish time, fast-path it.
+          // This covers the case where the race ends and Jolpica is already
+          // updated (Pi polled it before sending "finished").
+          if (champ && cStatus && !championConfirmed) {
+            String cs = String(cStatus);
+            if (cs == "confirmed") {
+              int champID = getTeamID(String(champ));
+              if (champID >= 1 && champID <= 11) {
+                Serial.printf("Pi confirms WDC at finish: %s\n", champ);
+                championTeamID    = champID;
+                championConfirmed = true;
+                pendingFinalRound = false;
+                EEPROM.write(EEPROM_SEASON_CHAMP, champID);
+                time_t nowT = time(nullptr);
+                if (nowT > 1700000000) {
+                  EEPROM.put(EEPROM_SEASON_TIME, nowT);
+                }
+                seasonFinished = true;
+                EEPROM.commit();
+                delay(1500);
+                triggerChampionCelebration(champID);
+              }
+            }
+            // "projected" at finish — don't act, let Jolpica poll confirm
+          }
           return;
         }
         if (s == "delayed") {
@@ -900,42 +1346,60 @@ void fetchRaceData() {
           if (lastSentTeam >= 1) sendToNano(CMD_PULSE);
           return;
         }
-        if (s == "cancelled") { 
-            raceCancelled = true;
-            raceSunday = false;
-            raceFinished = false;
-            lightsOutTriggered = false;
-            updateStatus("CANCELLED", C_RED);
-            drawMainScreen();
-            sendToNano(CMD_DISPLAY);
-            return;
+        if (s == "cancelled") {
+          raceCancelled = true; raceSunday = false;
+          raceFinished = false; lightsOutTriggered = false;
+          updateStatus("CANCELLED", C_RED);
+          drawMainScreen(); sendToNano(CMD_DISPLAY);
+          return;
         }
-    
         if (s == "postponed") { updateStatus("POSTPONED", C_RED); return; }
-
         if (s == "live") {
           int teamID = getTeamID(String(team));
           updateTeamDisplay(teamID, true);
-          if (teamID != lastSentTeam) {
-            sendToNano(teamID);
-            lastSentTeam = teamID;
-          }
-          sendToNano(CMD_PULSE); // keepalive every poll
-          updateStatus("LIVE", C_GREEN);
+          if (teamID != lastSentTeam) { sendToNano(teamID); lastSentTeam = teamID; }
+          sendToNano(CMD_PULSE);
 
-          if (elapsed >= 5400 && checkESPNFinished()) {
-            fetchRaceDataJolpica();
+          // Projected champion hint from Pi — shown only during the final race
+          // while we're still waiting for Jolpica confirmation.
+          // "projected"  → Pi's maths says this team will win the WDC
+          // "confirmed"  → Pi has cross-checked with Jolpica (belt-and-braces)
+          // NodeMCU never acts on this as truth — Jolpica via tryFetchChampion()
+          // remains the only gate for the real celebration.
+          if (champ && cStatus && pendingFinalRound && !championConfirmed) {
+            String cs = String(cStatus);
+            if (cs == "projected") {
+              updateStatus("WDC LIKELY", C_YELLOW);
+              Serial.printf("Pi projects WDC: %s\n", champ);
+            } else if (cs == "confirmed") {
+              // Pi already cross-checked Jolpica — trust it and fast-path
+              Serial.printf("Pi confirms WDC: %s\n", champ);
+              int champID = getTeamID(String(champ));
+              if (champID >= 1 && champID <= 11) {
+                championTeamID    = champID;
+                championConfirmed = true;
+                pendingFinalRound = false;
+                EEPROM.write(EEPROM_SEASON_CHAMP, champID);
+                time_t nowT = time(nullptr);
+                if (nowT > 1700000000) {
+                  EEPROM.put(EEPROM_SEASON_TIME, nowT);
+                }
+                seasonFinished = true;
+                EEPROM.commit();
+                triggerChampionCelebration(champID);
+                return;
+              }
+            }
+          } else {
+            updateStatus("LIVE", C_GREEN);
           }
+
+          if (elapsed >= 5400 && checkESPNFinished()) fetchRaceDataJolpica();
           return;
         }
-        // "pre" or "none" — fall through to Jolpica
       }
-    } else {
-      http.end();
-    }
-  } else {
-    http.end();
-  }
+    } else { http.end(); }
+  } else { http.end(); }
 
   piAvailable = false;
   fetchRaceDataJolpica();
@@ -963,10 +1427,9 @@ void fetchRaceDataJolpica() {
     doc, https.getStream(), DeserializationOption::Filter(filter));
   if (err) { https.end(); updateStatus("J ERR", C_RED); return; }
 
-  auto race = doc["MRData"]["RaceTable"]["Races"][0];
+  auto race          = doc["MRData"]["RaceTable"]["Races"][0];
   const char* gpName = race["raceName"];
-
-  JsonArray results = race["Results"].as<JsonArray>();
+  JsonArray results  = race["Results"].as<JsonArray>();
   if (results.isNull() || results.size() == 0) {
     https.end(); updateStatus("NO DATA", C_GREY); return;
   }
@@ -974,18 +1437,14 @@ void fetchRaceDataJolpica() {
   const char* team   = results[0]["Constructor"]["name"];
   const char* status = results[0]["status"];
   if (!status || !team) { https.end(); updateStatus("NO DATA", C_GREY); return; }
-
   https.end();
 
   time_t now     = time(nullptr);
   double elapsed = difftime(now, raceStartEpoch);
-
   if (elapsed < 0) { updateStatus("PRE RACE", C_YELLOW); return; }
 
   if (elapsed < 5400 && String(status) != "Finished") {
-    updateStatus("LIVE", C_GREEN);
-    sendToNano(CMD_PULSE);
-    return;
+    updateStatus("LIVE", C_GREEN); sendToNano(CMD_PULSE); return;
   }
 
   if (gpName) strncpy(lastGPName, gpName, sizeof(lastGPName) - 1);
@@ -1002,19 +1461,40 @@ void fetchRaceDataJolpica() {
 }
 
 // ==========================================================
-// RACE FINISHED RECENTLY — fast EEPROM path on boot
+// saveFinalWDCConstructor — kept for compatibility but no
+// longer called from handleRaceFinished. Champion detection
+// is now handled exclusively by tryFetchChampion() via the
+// polling loop. This prevents storing a stale last-season
+// champion at race-finish time.
+// ==========================================================
+void saveFinalWDCConstructor() {
+  // Intentionally empty — use tryFetchChampion() + checkChampionPoll()
+}
+
+// ==========================================================
+// RACE FINISHED RECENTLY — EEPROM fast path on boot
 // ==========================================================
 bool raceFinishedRecently() {
   time_t storedTime;
   EEPROM.get(EEPROM_LAST_RACE_TIME, storedTime);
   time_t now = time(nullptr);
   if (storedTime < 1700000000 || storedTime > now) return false;
-  double diff = difftime(now, storedTime);
-  if (diff < 43200) { // within 12h
+  if (difftime(now, storedTime) < 43200) {
     Serial.println("EEPROM: race finished recently");
     return true;
   }
   return false;
+}
+
+// ==========================================================
+// SEASON FINISHED RECENTLY — EEPROM fast path on boot
+// ==========================================================
+bool seasonFinishedRecently() {
+  time_t storedTime;
+  EEPROM.get(EEPROM_SEASON_TIME, storedTime);
+  time_t now = time(nullptr);
+  if (storedTime < 1700000000 || storedTime > now) return false;
+  return difftime(now, storedTime) < 43200;
 }
 
 // ==========================================================
