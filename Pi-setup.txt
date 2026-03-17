@@ -1,0 +1,116 @@
+F1 LED Pi Server — Setup Guide
+================================
+
+REQUIREMENTS
+------------
+- Raspberry Pi (any model with WiFi/ethernet)
+- Python 3.9+
+- Same local network as the NodeMCU
+
+
+1. COPY FILES
+-------------
+mkdir -p /home/pi/f1
+cp f1_server.py /home/pi/f1/
+
+
+2. CREATE VIRTUALENV AND INSTALL DEPS
+--------------------------------------
+cd /home/pi/f1
+python3 -m venv venv
+venv/bin/pip install flask requests
+
+
+3. TEST IT MANUALLY FIRST
+--------------------------
+cd /home/pi/f1
+venv/bin/python f1_server.py
+
+# In another terminal:
+curl http://localhost:5000/p1
+curl http://localhost:5000/status
+
+# Expected during off-season:
+# {"gp": "", "status": "idle", "team": "---"}
+
+# Expected during a live race:
+# {"gp": "Abu Dhabi Grand Prix", "status": "live", "team": "McLaren"}
+
+# Expected during final race with projection:
+# {"champion": "McLaren", "champion_status": "projected",
+#  "gp": "Abu Dhabi Grand Prix", "status": "live", "team": "Ferrari"}
+
+
+4. FIND YOUR PI'S IP ADDRESS
+-----------------------------
+hostname -I
+# Example output: 192.168.1.45
+
+# Update this line in F1_LED_Controller.ino:
+# const char* piHost = "192.168.1.45";  <-- your Pi's IP
+
+
+5. INSTALL AS SYSTEM SERVICE (auto-start on boot)
+--------------------------------------------------
+sudo cp f1server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable f1server
+sudo systemctl start f1server
+
+# Check it's running:
+sudo systemctl status f1server
+
+# View logs live:
+sudo journalctl -u f1server -f
+
+
+6. GIVE PI A STATIC IP (recommended)
+--------------------------------------
+So the NodeMCU always finds it at the same address.
+
+Option A — Router DHCP reservation (easiest):
+  Log into your router → find Pi's MAC address → assign fixed IP
+
+Option B — Pi static IP:
+  Edit /etc/dhcpcd.conf, add at bottom:
+    interface eth0          # or wlan0 for WiFi
+    static ip_address=192.168.1.45/24
+    static routers=192.168.1.1
+    static domain_name_servers=192.168.1.1
+
+  Then: sudo reboot
+
+
+7. VERIFY END TO END
+---------------------
+# With server running:
+curl http://192.168.1.45:5000/p1
+
+# During a race you should see status change from "pre" -> "live" -> "finished"
+# During the final race you'll also see champion / champion_status fields
+
+
+8. SEASON SETUP (do once before each new season)
+-------------------------------------------------
+The server auto-detects the total number of rounds from Jolpica on startup.
+No manual config needed for season start.
+
+The base_standings are fetched automatically when is_final_round is detected.
+This happens when the standings round == total_rounds - 1 (penultimate race done).
+
+
+TROUBLESHOOTING
+---------------
+NodeMCU shows "Jolpica" not "Pi+ESPN" in bottom-right corner:
+  → Pi server not reachable. Check IP address in .ino matches Pi's actual IP.
+  → Check server is running: sudo systemctl status f1server
+  → Check firewall: sudo ufw allow 5000
+
+Server log shows ESPN fetch failures:
+  → Pi has no internet. Check: ping 8.8.8.8
+  → ESPN endpoint may be temporarily down (NodeMCU falls back to Jolpica)
+
+champion_status stuck at "projected" after race:
+  → Jolpica hasn't updated yet. Normal — can take 30-60 min after race end.
+  → Server polls every 90 seconds. NodeMCU also polls Jolpica independently.
+  → Both paths converge on the same confirmed result.
