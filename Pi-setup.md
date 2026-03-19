@@ -289,3 +289,167 @@ hostname -I
 - [ ] Service starts automatically after `sudo reboot`
 - [ ] NodeMCU shows `Pi+ESPN` in TFT footer
 - [ ] During a race, status changes from `pre` → `live` → `finished`
+
+---
+## Why the Raspberry Pi Server is Necessary (F1 Live LED System)
+
+### Initial Assumption: Multiple API Calls Required
+
+In many sports APIs (including official Formula 1 data sources), fetching live race data typically requires multiple dependent API calls:
+
+1. Fetch current event / race information
+2. Fetch live driver positions / timing
+3. Fetch additional statistics (fastest lap, classifications, etc.)
+
+This leads to a chained request flow:
+
+```
+Get race → Get competitors → Get stats
+```
+
+Such a design would be inefficient and unreliable on constrained hardware like the ESP8266 (NodeMCU), due to:
+
+* Limited memory
+* TLS/HTTPS overhead
+* Increased latency
+* Complex error handling
+
+---
+
+### Reality: ESPN Scoreboard is an Aggregated Endpoint
+
+The ESPN endpoint used in this project:
+
+```
+https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard
+```
+
+already provides a **fully aggregated snapshot** of the race.
+
+Internally, ESPN likely performs:
+
+```
+Fetch race data
+Fetch competitors
+Fetch stats
+Merge everything
+→ Return single JSON response
+```
+
+So instead of multiple API calls, the system uses:
+
+```
+NodeMCU → Raspberry Pi → ESPN (single request)
+```
+
+---
+
+### Why the Raspberry Pi is Still Essential
+
+Even though only **one API call** is required, the Raspberry Pi plays a critical role as a processing layer.
+
+#### 1) JSON Parsing Constraints
+
+The ESPN response is large and deeply nested.
+
+* ESP8266 has ~40–50 KB usable heap
+* ArduinoJson struggles with large payloads
+* Risk of crashes due to memory fragmentation
+
+The Raspberry Pi safely parses and extracts only the required data.
+
+---
+
+#### 2) HTTPS / TLS Handling
+
+Making HTTPS requests requires a TLS handshake:
+
+* Slow and unreliable on ESP8266
+* Certificate validation issues
+* Frequent connection failures
+
+The Raspberry Pi handles all HTTPS communication reliably.
+
+---
+
+#### 3) Data Normalisation (Critical for LED Logic)
+
+Different APIs return inconsistent constructor names:
+
+```
+"McLaren F1 Team" → "McLaren"
+"Mercedes-AMG Petronas" → "Mercedes"
+```
+
+Your NodeMCU depends on exact string matches for LED control.
+The Raspberry Pi ensures consistent naming via normalization.
+
+---
+
+#### 4) Champion Projection Logic
+
+The Raspberry Pi computes live championship projections using:
+
+* FIA points system
+* Fastest lap bonus (+1 point if in top 10)
+* Constructor aggregation (both drivers)
+* Real-time standings updates
+
+Example:
+
+```
+project_champion(live_results)
+```
+
+This logic is computationally intensive and unsuitable for ESP8266.
+
+---
+
+#### 5) Polling, Rate Limiting & Stability
+
+The Raspberry Pi:
+
+* Polls ESPN every 10 seconds
+* Handles API failures gracefully
+* Maintains cached state
+
+Direct polling from NodeMCU would:
+
+* Increase failure rates
+* Risk API throttling
+* Complicate retry logic
+
+---
+
+### System Architecture
+
+```
+ESPN API (complex, heavy, nested JSON)
+        ↓
+Raspberry Pi (processing layer)
+  - Fetches data
+  - Parses JSON
+  - Normalises names
+  - Computes championship logic
+        ↓
+NodeMCU (display layer)
+  - Consumes simplified JSON
+  - Controls LED output
+```
+
+---
+
+### Final Takeaways
+
+* Multiple API calls are **not required** for ESPN scoreboard
+* Raspberry Pi is still **essential** as a processing and abstraction layer
+* The current architecture is efficient, scalable, and robust
+
+The correct mental model is:
+
+> The ESP8266 should not directly handle complex APIs, large JSON payloads, TLS, or race logic.
+
+Instead, it acts as a lightweight display client, while the Raspberry Pi serves as the intelligent backend.
+
+---
+
