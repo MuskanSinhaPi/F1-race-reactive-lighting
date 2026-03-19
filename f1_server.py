@@ -7,9 +7,9 @@ Serves /p1 endpoint to the NodeMCU ESP8266.
 Response JSON contract:
 {
   "team":             "McLaren",          # current race P1 constructor
-  "status":           "live",             # live | finished | delayed | cancelled | postponed
+  "status":           "live",             # live | finished | delayed | cancelled | postponed | scheduled | idle
   "gp":               "Abu Dhabi Grand Prix",
-  "champion":         "McLaren",          # Pi-projected or confirmed WDC constructor (final race only)
+  "champion":         "McLaren",          # Pi-projected or confirmed WCC constructor (final race only)
   "champion_status":  "projected"         # "projected" | "confirmed" | null
 }
 
@@ -17,14 +17,15 @@ champion / champion_status are only populated during the final race weekend.
 For all other races they are omitted entirely so the NodeMCU ignores them.
 
 Data sources (in priority order):
-  1. ESPN scoreboard  — live positions, race status, fastest lap
-  2. Jolpica          — official standings (truth source for champion confirmation)
+  1. ESPN scoreboard          — live positions, race status, fastest lap
+  2. Jolpica driver standings — round tracking
+  3. Jolpica constructor standings — truth source for WCC champion confirmation
 
 Season logic:
   - Before final race weekend: standings fetched once, cached as base_points
   - During final race: live ESPN positions applied to base_points each poll
   - champion_status = "projected" while maths gives a clear winner
-  - champion_status = "confirmed" once Jolpica standings round == total_rounds
+  - champion_status = "confirmed" once Jolpica constructor standings round == total_rounds
 """
 
 import time
@@ -46,13 +47,15 @@ log = logging.getLogger("f1")
 app = Flask(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard"
-JOLPICA_STANDINGS = "https://api.jolpi.ca/ergast/f1/current/driverStandings.json"
-JOLPICA_SCHEDULE  = "https://api.jolpi.ca/ergast/f1/current.json"
+ESPN_SCOREBOARD              = "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard"
+JOLPICA_DRIVER_STANDINGS     = "https://api.jolpi.ca/ergast/f1/current/driverStandings.json"
+JOLPICA_CONSTRUCTOR_STANDINGS = "https://api.jolpi.ca/ergast/f1/current/constructorStandings.json"  # FIX #2
+JOLPICA_SCHEDULE             = "https://api.jolpi.ca/ergast/f1/current.json"
 
-POLL_INTERVAL   = 10      # seconds between ESPN polls during race
-CHAMP_POLL_SECS = 90      # seconds between Jolpica champion confirmation polls
-REQUEST_TIMEOUT = 6       # HTTP timeout
+POLL_INTERVAL        = 10    # seconds between ESPN polls during race
+CHAMP_POLL_SECS      = 90    # seconds between Jolpica champion confirmation polls
+ROUND_CHECK_INTERVAL = 300   # seconds between periodic current-round checks (#1)
+REQUEST_TIMEOUT      = 6     # HTTP timeout
 
 # Points tables
 RACE_POINTS   = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
@@ -64,7 +67,7 @@ state_lock = threading.Lock()
 state = {
     # Latest data served to NodeMCU
     "team":             "---",
-    "status":           "idle",       # idle | live | finished | delayed | cancelled | postponed
+    "status":           "idle",       # idle | scheduled | live | finished | delayed | cancelled | postponed
     "gp":               "",
 
     # Champion fields — only populated on final race weekend
@@ -90,10 +93,10 @@ state = {
 
     "last_espn_poll":   0,
     "last_champ_poll":  0,
+    "last_round_check": 0,   # FIX #1: tracks periodic round re-checks
 }
 
 # ── Constructor name normalisation ────────────────────────────────────────────
-# Maps ESPN / Jolpica name variants to canonical names matching NodeMCU getTeamID()
 CONSTRUCTOR_MAP = {
     "red bull racing":       "Red Bull",
     "red bull":              "Red Bull",
@@ -131,7 +134,7 @@ def norm_constructor(name: str) -> str:
 # ── Schedule helpers ──────────────────────────────────────────────────────────
 
 def fetch_schedule():
-    """Fetch current season schedule, set total_rounds and is_final_round."""
+    """Fetch current season schedule, set total_rounds."""
     try:
         r = requests.get(JOLPICA_SCHEDULE, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
@@ -148,9 +151,14 @@ def fetch_schedule():
 
 
 def check_if_final_round():
-    """Determine current round from Jolpica standings and flag if final."""
+    """
+    Determine current round from Jolpica driver standings and flag if final.
+
+    FIX #1: Use strict equality (current_round == total_rounds - 1) rather than
+    >= to avoid mis-flagging if Jolpica updates early or late.
+    """
     try:
-        r = requests.get(JOLPICA_STANDINGS, timeout=REQUEST_TIMEOUT)
+        r = requests.get(JOLPICA_DRIVER_STANDINGS, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         lists = data["MRData"]["StandingsTable"]["StandingsLists"]
@@ -158,9 +166,11 @@ def check_if_final_round():
             return
         current_round = int(lists[0].get("round", 0))
         with state_lock:
+            total = state["total_rounds"]
             state["current_round"] = current_round
-            state["is_final_round"] = (current_round + 1 >= state["total_rounds"])
-            log.info(f"Current round: {current_round}/{state['total_rounds']} "
+            # FIX #1: strict equality — avoids off-by-one on early/late Jolpica updates
+            state["is_final_round"] = (current_round == total - 1)
+            log.info(f"Current round: {current_round}/{total} "
                      f"— final: {state['is_final_round']}")
     except Exception as e:
         log.warning(f"Round check failed: {e}")
@@ -173,10 +183,9 @@ def fetch_base_standings():
     Fetch current driverStandings and build base_driver_points,
     driver_constructor, and base_constructor_points.
     Called once before the final race starts.
-    Points already include all previous races + sprints.
     """
     try:
-        r = requests.get(JOLPICA_STANDINGS, timeout=REQUEST_TIMEOUT)
+        r = requests.get(JOLPICA_DRIVER_STANDINGS, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         lists = data["MRData"]["StandingsTable"]["StandingsLists"]
@@ -208,7 +217,6 @@ def fetch_base_standings():
             state["standings_fetched"]       = True
 
         log.info(f"Base standings loaded — {len(driver_points)} drivers")
-        # Log top 5 constructors
         top = sorted(constructor_points.items(), key=lambda x: x[1], reverse=True)[:5]
         for name, pts in top:
             log.info(f"  {name}: {pts} pts")
@@ -221,15 +229,8 @@ def fetch_base_standings():
 
 def project_champion(live_results: list) -> str | None:
     """
-    Given live_results = [{"pos": 1, "driver_id": "NOR", "constructor": "McLaren",
-                            "fastest_lap": False, "classified": True}, ...]
-    Apply race points on top of base standings and return projected
-    constructor champion name, or None if no clear leader.
-
-    Handles:
-    - Fastest lap +1 point (only if driver finishes top 10)
-    - Only classified finishers receive points
-    - Constructor aggregation across both drivers
+    Given live_results, apply race points on top of base standings and return
+    projected constructor champion name, or None if no clear leader.
     """
     with state_lock:
         base = dict(state["base_constructor_points"])
@@ -239,7 +240,6 @@ def project_champion(live_results: list) -> str | None:
         return None
 
     projected = dict(base)
-
     classified = [r for r in live_results if r.get("classified", True)]
 
     for i, result in enumerate(classified):
@@ -251,14 +251,10 @@ def project_champion(live_results: list) -> str | None:
         if not constructor:
             continue
         pts = RACE_POINTS[i]
-
-        # Fastest lap: +1 only if driver finishes top 10
         if result.get("fastest_lap") and i < 10:
             pts += 1
-
         projected[constructor] = projected.get(constructor, 0) + pts
 
-    # Find leader
     if not projected:
         return None
     sorted_teams = sorted(projected.items(), key=lambda x: x[1], reverse=True)
@@ -273,12 +269,15 @@ def project_champion(live_results: list) -> str | None:
 
 def try_confirm_champion_jolpica() -> str | None:
     """
-    Poll Jolpica standings. Returns confirmed constructor name if
-    standingsRound == total_rounds (Jolpica has processed the final race),
+    Poll Jolpica CONSTRUCTOR standings (not driver standings).
+    Returns confirmed constructor name if standingsRound == total_rounds,
     otherwise None.
+
+    FIX #2: Uses constructorStandings endpoint for official WCC confirmation
+    instead of deriving from driver P1's constructor (which is not guaranteed correct).
     """
     try:
-        r = requests.get(JOLPICA_STANDINGS, timeout=REQUEST_TIMEOUT)
+        r = requests.get(JOLPICA_CONSTRUCTOR_STANDINGS, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         lists = data["MRData"]["StandingsTable"]["StandingsLists"]
@@ -287,24 +286,24 @@ def try_confirm_champion_jolpica() -> str | None:
 
         standings_round = int(lists[0].get("round", 0))
         with state_lock:
-            total = state["total_rounds"]
+            total   = state["total_rounds"]
             current = state["current_round"]
 
         if standings_round < current:
-            log.info(f"Jolpica standings at round {standings_round}, need {current} — waiting")
+            log.info(f"Jolpica constructor standings at round {standings_round}, need {current} — waiting")
             return None
 
         if standings_round < total:
-            log.info(f"Jolpica round {standings_round}/{total} — not final round")
+            log.info(f"Jolpica constructor round {standings_round}/{total} — not final round yet")
             return None
 
-        # Standings are current and this is the final round
-        p1 = lists[0]["DriverStandings"][0]
-        constructors = p1.get("Constructors", [])
-        if not constructors:
+        # FIX #2: read directly from ConstructorStandings P1 entry
+        constructor_standings = lists[0].get("ConstructorStandings", [])
+        if not constructor_standings:
             return None
-        champion = norm_constructor(constructors[-1]["name"])
-        log.info(f"Jolpica confirms champion: {champion} (round {standings_round})")
+        p1 = constructor_standings[0]
+        champion = norm_constructor(p1["Constructor"]["name"])
+        log.info(f"Jolpica confirms WCC: {champion} (round {standings_round})")
         return champion
 
     except Exception as e:
@@ -314,17 +313,14 @@ def try_confirm_champion_jolpica() -> str | None:
 
 # ── ESPN polling ──────────────────────────────────────────────────────────────
 
-def parse_espn_scoreboard() -> dict:
+def parse_espn_scoreboard() -> dict | None:
     """
-    Fetch ESPN F1 scoreboard. Returns:
-    {
-      "status":      "pre" | "in" | "post",
-      "completed":   bool,
-      "gp":          str,
-      "competitors": [{"pos": int, "driver_id": str, "constructor": str,
-                       "fastest_lap": bool, "classified": bool}, ...]
-    }
-    Returns None on failure.
+    Fetch ESPN F1 scoreboard. Returns parsed result dict or None on failure.
+
+    FIX #3: driver_id from ESPN shortName is fragile vs Ergast driverId — noted
+             but acceptable since constructor fallback already handles it correctly.
+    FIX #5: espn_status "pre" replaced with "scheduled" to match API contract.
+    FIX #6: Added STATUS_CANCELED and STATUS_POSTPONED handling.
     """
     try:
         r = requests.get(ESPN_SCOREBOARD, timeout=REQUEST_TIMEOUT)
@@ -335,7 +331,13 @@ def parse_espn_scoreboard() -> dict:
         if not events:
             return None
 
-        event = events[0]
+        # FIX #2: prefer the event whose name contains "Grand Prix" to avoid
+        # accidentally picking a practice session or sprint event when ESPN
+        # returns multiple competitions in the same weekend.
+        event = next(
+            (e for e in events if "Grand Prix" in e.get("name", "")),
+            events[0]   # fall back to first event if no explicit GP match
+        )
         gp_name = event.get("name", "")
         competitions = event.get("competitions", [])
 
@@ -346,7 +348,6 @@ def parse_espn_scoreboard() -> dict:
                 race_comp = comp
                 break
         if not race_comp:
-            # Fall back to first competition
             race_comp = competitions[0] if competitions else None
         if not race_comp:
             return None
@@ -356,36 +357,41 @@ def parse_espn_scoreboard() -> dict:
         status_name = status_type.get("name", "")
         completed   = status_type.get("completed", False)
 
-        if status_name in ("STATUS_SCHEDULED", "STATUS_DELAYED"):
-            espn_status = "pre"
-        elif status_name == "STATUS_IN_PROGRESS":
-            espn_status = "in"
-        elif status_name in ("STATUS_FINAL", "STATUS_FINAL_OVERTIME"):
-            espn_status = "post"
-        else:
-            espn_status = "pre"
-
-        if status_name == "STATUS_DELAYED":
+        # FIX #5: "pre" → "scheduled" to match documented contract
+        # FIX #6: added cancelled and postponed mappings
+        if status_name in ("STATUS_SCHEDULED",):
+            espn_status = "scheduled"
+        elif status_name == "STATUS_DELAYED":
             espn_status = "delayed"
+        elif status_name == "STATUS_IN_PROGRESS":
+            espn_status = "live"
+        elif status_name in ("STATUS_FINAL", "STATUS_FINAL_OVERTIME"):
+            espn_status = "finished"
+        elif status_name == "STATUS_CANCELED":           # FIX #6
+            espn_status = "cancelled"
+        elif status_name == "STATUS_POSTPONED":          # FIX #6
+            espn_status = "postponed"
+        else:
+            espn_status = "scheduled"
 
         competitors = []
         for comp in race_comp.get("competitors", []):
-            pos = comp.get("order", 99)
-            athlete = comp.get("athlete", {})
+            pos      = comp.get("order", 99)
+            athlete  = comp.get("athlete", {})
+            # FIX #3: driver_id kept for potential future use but constructor
+            # is the primary key; ESPN shortName ≠ Ergast driverId so we don't
+            # rely on it for standings lookups.
             driver_id = athlete.get("shortName", "").upper().replace(" ", "")
-            # ESPN uses "team" for constructor
-            team_obj = comp.get("team", {})
+            team_obj   = comp.get("team", {})
             constructor = norm_constructor(team_obj.get("displayName", ""))
 
-            # Fastest lap flag
             fastest_lap = False
             for stat in comp.get("statistics", []):
                 if stat.get("name", "").lower() in ("fastest lap", "fastestlap"):
                     fastest_lap = stat.get("value") == "1"
 
-            # Classified: ESPN marks DNFs/DNQs in status
             comp_status = comp.get("status", {}).get("type", {}).get("name", "")
-            classified = comp_status not in ("DNF", "DNS", "DSQ", "NC", "EX")
+            classified  = comp_status not in ("DNF", "DNS", "DSQ", "NC", "EX")
 
             competitors.append({
                 "pos":         pos,
@@ -399,7 +405,7 @@ def parse_espn_scoreboard() -> dict:
 
         return {
             "status":      espn_status,
-            "completed":   completed or (espn_status == "post"),
+            "completed":   completed or (espn_status == "finished"),
             "gp":          gp_name,
             "competitors": competitors,
         }
@@ -415,7 +421,6 @@ def poll_loop():
     """Background thread — polls ESPN every POLL_INTERVAL seconds."""
     log.info("Poll loop started")
 
-    # Initial schedule fetch
     fetch_schedule()
     check_if_final_round()
 
@@ -425,23 +430,41 @@ def poll_loop():
         with state_lock:
             last_poll       = state["last_espn_poll"]
             last_champ      = state["last_champ_poll"]
+            last_round_chk  = state["last_round_check"]
             race_finished   = state["race_finished"]
             champ_confirmed = state["champion_confirmed"]
             is_final        = state["is_final_round"]
             standings_ok    = state["standings_fetched"]
 
-        # Fetch base standings once before the final race if not yet done
+        # FIX #1: re-check current round periodically so is_final_round stays
+        # accurate if the Pi runs across multiple race weekends without a restart.
+        if now - last_round_chk >= ROUND_CHECK_INTERVAL:
+            with state_lock:
+                state["last_round_check"] = now
+            check_if_final_round()
+            # Re-read is_final after update
+            with state_lock:
+                is_final     = state["is_final_round"]
+                standings_ok = state["standings_fetched"]
+
         if is_final and not standings_ok:
             log.info("Final round detected — fetching base standings")
             fetch_base_standings()
 
-        # ESPN poll
         if now - last_poll >= POLL_INTERVAL:
             with state_lock:
                 state["last_espn_poll"] = now
 
             espn = parse_espn_scoreboard()
-            if espn:
+
+            # FIX #4: reset to idle when ESPN returns no data, preventing stale state
+            if espn is None:
+                with state_lock:
+                    state["status"] = "idle"
+                    state["team"]   = "---"
+                    state["gp"]     = ""     # FIX #3: clear stale GP name on idle
+                log.warning("ESPN returned no data — state reset to idle")
+            else:
                 _process_espn(espn)
 
         # Champion confirmation poll (every CHAMP_POLL_SECS, after race ends)
@@ -452,17 +475,23 @@ def poll_loop():
                 confirmed = try_confirm_champion_jolpica()
                 if confirmed:
                     with state_lock:
-                        state["champion_confirmed"]  = True
-                        state["confirmed_champion"]  = confirmed
-                        state["champion"]            = confirmed
-                        state["champion_status"]     = "confirmed"
-                    log.info(f"Champion confirmed and set: {confirmed}")
+                        state["champion_confirmed"] = True
+                        state["confirmed_champion"] = confirmed
+                        state["champion"]           = confirmed
+                        state["champion_status"]    = "confirmed"
+                    log.info(f"WCC confirmed and set: {confirmed}")
 
         time.sleep(2)
 
 
 def _process_espn(espn: dict):
-    """Apply ESPN data to state. Called from poll_loop."""
+    """
+    Apply ESPN data to state. Called from poll_loop.
+
+    FIX #5: Removed "pre" status; now uses "scheduled" from parse step.
+    FIX #6: Added cancelled/postponed branches.
+    FIX #7: All reads and writes tightly scoped under state_lock.
+    """
     gp          = espn["gp"]
     espn_status = espn["status"]
     completed   = espn["completed"]
@@ -472,46 +501,57 @@ def _process_espn(espn: dict):
     if competitors:
         p1_constructor = norm_constructor(competitors[0].get("constructor", ""))
 
+    # FIX #7: read all needed state in one locked block
     with state_lock:
         is_final        = state["is_final_round"]
         champ_confirmed = state["champion_confirmed"]
         confirmed_champ = state["confirmed_champion"]
+        current_team    = state["team"]
 
+    # ── Update GP name atomically ─────────────────────────────────────────────
     if gp:
         with state_lock:
             state["gp"] = gp
 
-    # ── Determine race status ─────────────────────────────────────────────────
+    # ── Cancelled / Postponed ─────────────────────────────────────────────────
+    if espn_status in ("cancelled", "postponed"):                  # FIX #6
+        with state_lock:
+            state["status"] = espn_status
+        log.info(f"Race {espn_status}")
+        return
+
+    # ── Delayed ───────────────────────────────────────────────────────────────
     if espn_status == "delayed":
         with state_lock:
             state["status"] = "delayed"
-            state["team"]   = p1_constructor or state["team"]
+            state["team"]   = p1_constructor or current_team
         log.info("Race delayed")
         return
 
-    if espn_status == "pre":
+    # ── Pre-race / Scheduled ──────────────────────────────────────────────────
+    if espn_status == "scheduled":                                 # FIX #5
         with state_lock:
-            state["status"] = "pre"
+            state["status"] = "scheduled"
         return
 
-    if espn_status == "in" or (espn_status == "post" and not completed):
-        # Race in progress
+    # ── Live ──────────────────────────────────────────────────────────────────
+    if espn_status == "live":
         with state_lock:
-            state["status"]       = "live"
-            state["team"]         = p1_constructor or state["team"]
+            state["status"]        = "live"
+            state["team"]          = p1_constructor or current_team
             state["race_finished"] = False
 
-        # Champion projection for final race
         if is_final and not champ_confirmed and competitors:
             projected = project_champion(competitors)
             if projected:
                 with state_lock:
                     state["champion"]        = projected
                     state["champion_status"] = "projected"
-                log.info(f"Projected champion: {projected}")
+                log.info(f"Projected WCC: {projected}")
         return
 
-    if completed or espn_status == "post":
+    # ── Finished ──────────────────────────────────────────────────────────────
+    if completed or espn_status == "finished":
         with state_lock:
             already_finished = state["race_finished"]
 
@@ -520,26 +560,24 @@ def _process_espn(espn: dict):
 
         with state_lock:
             state["status"]        = "finished"
-            state["team"]          = p1_constructor or state["team"]
+            state["team"]          = p1_constructor or current_team
             state["race_finished"] = True
 
-        # On final race: set projected champ at finish if not yet confirmed
         if is_final and not champ_confirmed and competitors:
             projected = project_champion(competitors)
             if projected:
                 with state_lock:
                     state["champion"]        = projected
                     state["champion_status"] = "projected"
-                log.info(f"Race finished — projected champion: {projected}")
+                log.info(f"Race finished — projected WCC: {projected}")
 
-        # If already Jolpica-confirmed, keep it
         if is_final and champ_confirmed and confirmed_champ:
             with state_lock:
                 state["champion"]        = confirmed_champ
                 state["champion_status"] = "confirmed"
 
 
-# ── Flask endpoint ────────────────────────────────────────────────────────────
+# ── Flask endpoints ───────────────────────────────────────────────────────────
 
 @app.route("/p1")
 def p1():
@@ -552,7 +590,6 @@ def p1():
         "gp":     s["gp"]     or "",
     }
 
-    # Only include champion fields during final race weekend
     if s["is_final_round"] and s["champion"]:
         resp["champion"]        = s["champion"]
         resp["champion_status"] = s["champion_status"]
@@ -562,7 +599,7 @@ def p1():
 
 @app.route("/status")
 def status():
-    """Debug endpoint — full internal state."""
+    """Debug endpoint — full internal state (excludes large lookup tables)."""
     with state_lock:
         return jsonify({k: v for k, v in state.items()
                         if k not in ("base_driver_points",
