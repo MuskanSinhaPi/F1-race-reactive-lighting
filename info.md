@@ -763,3 +763,11 @@ ESP8266	restricted / sandboxed
 If you want, I can next:
 👉 Show you how to **reduce ESPN payload size further** (ultra-optimized Pi → NodeMCU response)
 👉 Or help you simulate failures so your display never glitches mid-race
+Same room, same router — this is actually the easiest possible case. The ISP router blocking device-to-device is almost certainly just AP isolation (also called "client isolation") — a setting that prevents WiFi devices from talking to each other while still letting them reach the internet.
+The fix that requires zero code changes: plug the Pi in via ethernet.
+NodeMCU  ──WiFi──┐
+                 ├── ISP Router
+Pi       ──LAN──┘
+AP isolation only applies to WiFi↔WiFi. A wired Pi is on the LAN side of the router, so the NodeMCU can reach it freely. Your existing code works as-is, IP stays 192.168.1.45.
+If ethernet isn't possible, the next best option is turning off AP isolation in the router settings — login to your router admin page (usually 192.168.1.1), find "AP Isolation" or "Client Isolation" under the WiFi settings, and disable it. Takes 30 seconds.
+If neither of those is an option (router is ISP-locked and no ethernet port nearby), then WebSocket is the right code approach — but try the hardware fixes first since they're instant and free.
