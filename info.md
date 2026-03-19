@@ -724,6 +724,40 @@ Your NodeMCU would need to:
 * ✅ You **DO need the Pi as a processing layer**
 * 🚀 Your current system design is actually **very solid and production-like**
 
+----
+Yes, you did everything right so far 👍 — and this result tells us something very specific:
+
+TCP FAILED
+
+Even after changing to port 8080, that means:
+
+🔴 Your router is blocking ESP8266 → Pi TCP entirely (not just port 5000)
+
+🧠 Important realization
+
+You have now ruled out:
+
+❌ Port issue (5000 vs 8080)
+
+❌ Code issue
+
+❌ HTTPClient issue
+
+So what’s left is:
+
+⚠️ Network isolation / routing behavior specific to ESP8266
+
+🚨 Why this happens
+
+Some routers (especially ISP ones) treat devices differently:
+
+Device	Behavior
+Laptop	full access
+Phone	full access
+ESP8266	restricted / sandboxed
+
+👉 Even on same WiFi
+
 ---
 
 If you want, I can next:
