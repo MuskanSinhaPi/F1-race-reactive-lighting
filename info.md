@@ -398,3 +398,334 @@ Free live P1 data — no longer possible without F1 TV
 Jolpica — free, but only updates after race ends, slow
 Your current system — actually the best you can do for free
 The system works great for everything except mid-race P1 updates. That feature simply requires a paid subscription now. Jolpica for the finished detection is the right approach — just have to wait for it to update after the race ends.
+
+-------------------------------------------
+Short answer: **No — your code is *not* doing a chain of calls. It makes a *single request* to one ESPN endpoint each poll.**
+
+---
+
+### 🔍 What your code actually does
+
+Every `POLL_INTERVAL` (10 seconds), this happens:
+
+```python
+r = requests.get(ESPN_SCOREBOARD, timeout=REQUEST_TIMEOUT)
+```
+
+👉 That endpoint is:
+
+```
+https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard
+```
+
+---
+
+### 🧠 Why this is important
+
+That **one endpoint already contains everything** you need:
+
+* Current race status (live / delayed / finished)
+* Driver positions (`order`)
+* Constructor/team info
+* Fastest lap stats
+* Competitor classification (DNF, etc.)
+
+So you're **not doing this**:
+
+❌ Fetch event → then fetch race → then fetch drivers → then fetch stats
+❌ Multiple dependent API calls (no chaining)
+
+---
+
+### 🧩 Instead, you're doing this:
+
+✔ **Single call → parse nested JSON → extract everything**
+
+Your `parse_espn_scoreboard()` function is just walking through:
+
+```
+events → competitions → competitors → statistics
+```
+
+---
+
+### 📦 Think of it like:
+
+Instead of:
+
+> "Give me race → now give me drivers → now give me stats"
+
+You're doing:
+
+> "Give me the *entire race snapshot in one go*"
+
+---
+
+### ⚡ Why ESPN designed it this way
+
+This endpoint is meant for:
+
+* Live scoreboards
+* Apps / dashboards (like yours 👀)
+* Low-latency polling systems
+
+So it's intentionally:
+
+* **Flat enough to parse**
+* **Rich enough to avoid multiple requests**
+
+---
+
+### 🚀 Performance implication (good news)
+
+Your current design is actually **optimal**:
+
+* Only **1 HTTP request per 10 seconds**
+* Minimal latency
+* Less chance of rate limiting
+* Simpler error handling
+
+---
+
+### ⚠️ When would chaining be needed?
+
+You'd need multiple calls *only if* you wanted:
+
+* Sector times / telemetry (not in scoreboard)
+* Lap-by-lap timing
+* Tyre data
+* Detailed race control messages
+
+👉 That’s when people switch to:
+
+* WebSockets (`livetiming.formula1.com`)
+* Or deeper ESPN endpoints (not public/consistent)
+
+---
+
+### 🧠 Final verdict
+
+✅ **You are NOT chaining API calls**
+✅ **You are using a single aggregated endpoint (best practice here)**
+✅ **Your architecture is clean and efficient**
+
+---
+
+If you want, I can next:
+👉 Break down the exact ESPN JSON structure (so you fully understand what you're parsing)
+👉 Or help you simulate/mock this endpoint for testing without hitting ESPN every time
+Ahh — I see where the confusion came from. Your *original assumption* wasn’t wrong in general… it’s just **not true for the specific ESPN endpoint you chose**.
+
+Let’s clear this up properly 👇
+
+---
+
+## 🧠 Where the “3 API calls” idea comes from
+
+In most sports APIs (and even F1 official data), you typically need:
+
+1. **Event / race info**
+2. **Live positions / timing**
+3. **Extra stats (fastest lap, status, etc.)**
+
+So the flow usually looks like:
+
+```
+Get current race → get competitors → get stats
+```
+
+👉 That *would* be multiple dependent calls
+👉 And yes — that would be painful on an ESP8266
+
+---
+
+## ⚡ What you discovered (without realizing it 😄)
+
+The ESPN **scoreboard endpoint is already an aggregated endpoint**
+
+It basically does this internally:
+
+```
+[ESPN backend]
+   ↓
+Fetch race data
+Fetch competitors
+Fetch stats
+Merge everything
+   ↓
+Return ONE JSON
+```
+
+So your Pi is calling:
+
+```
+NodeMCU → Pi → ESPN (1 call)
+```
+
+Instead of what you feared:
+
+```
+NodeMCU → ESPN (call 1 → call 2 → call 3)
+```
+
+---
+
+## 🧩 Why your Pi still makes sense (VERY important)
+
+Even though ESPN only needs **1 call**, your Raspberry Pi is still doing a LOT of heavy lifting that your NodeMCU *cannot safely do*:
+
+### 1️⃣ JSON parsing complexity
+
+ESPN response is **deeply nested and large**
+
+Your NodeMCU would struggle with:
+
+* Memory (ESP8266 has ~40–50 KB usable heap)
+* ArduinoJson limits
+* Fragmentation crashes
+
+---
+
+### 2️⃣ HTTPS + TLS overhead
+
+This line:
+
+```python
+requests.get("https://site.api.espn.com/...")
+```
+
+👉 Requires full TLS handshake
+
+On ESP8266:
+
+* Slow
+* Unstable
+* Certificate issues
+* Often fails silently
+
+---
+
+### 3️⃣ Data normalization (CRITICAL for your LED logic)
+
+Your Pi is doing:
+
+```python
+norm_constructor(...)
+```
+
+Mapping:
+
+```
+"McLaren F1 Team" → "McLaren"
+"Mercedes-AMG Petronas" → "Mercedes"
+```
+
+👉 Your NodeMCU logic **depends on exact string matches**
+
+Without this:
+
+* LEDs would break randomly
+* Teams wouldn’t match
+
+---
+
+### 4️⃣ Champion projection logic (this is HUGE)
+
+This part alone:
+
+```python
+project_champion(...)
+```
+
+Includes:
+
+* Applying FIA points system
+* Fastest lap logic
+* Constructor aggregation
+* Live simulation
+
+👉 This is **way too heavy** for a NodeMCU
+
+---
+
+### 5️⃣ Rate limiting + resilience
+
+Your Pi:
+
+* Polls every 10 sec
+* Handles failures
+* Caches state
+
+If NodeMCU did this directly:
+
+* Higher failure rate
+* Possible API blocking
+* Messy retry logic
+
+---
+
+## 🔥 So was your original reasoning wrong?
+
+👉 **Conceptually correct**
+👉 **Technically unnecessary for THIS endpoint**
+👉 **Still the right architectural decision**
+
+---
+
+## 🧠 The real reason your Pi is useful (correct mental model)
+
+Not:
+
+> “ESP8266 can’t make 3 API calls”
+
+But:
+
+> “ESP8266 should not handle complex APIs, heavy JSON, TLS, and race logic”
+
+---
+
+## ⚡ Your current architecture is actually ideal
+
+```
+ESPN API (complex, heavy, nested)
+        ↓
+Raspberry Pi (brain 🧠)
+  - Parses
+  - Simplifies
+  - Normalizes
+  - Computes champion
+        ↓
+NodeMCU (dumb display ⚡)
+  - Just reads:
+    {
+      "team": "McLaren",
+      "status": "live"
+    }
+```
+
+---
+
+## 💡 If you removed the Pi…
+
+Your NodeMCU would need to:
+
+* Parse ~50KB JSON ❌
+* Handle TLS reliably ❌
+* Maintain mappings ❌
+* Compute standings ❌
+
+👉 It would become unstable *very fast*
+
+---
+
+## 🧾 Final takeaway
+
+* ❌ You **don’t need multiple ESPN calls**
+* ✅ You **DO need the Pi as a processing layer**
+* 🚀 Your current system design is actually **very solid and production-like**
+
+---
+
+If you want, I can next:
+👉 Show you how to **reduce ESPN payload size further** (ultra-optimized Pi → NodeMCU response)
+👉 Or help you simulate failures so your display never glitches mid-race
