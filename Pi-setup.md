@@ -24,6 +24,7 @@ Lite = no desktop. You don't need one. Faster, less RAM used.
 **3. Click the gear icon ⚙️ (Advanced options) before flashing — this is important**
 
 Set:
+- ✅ Set host name to raspberrypi (I set it to "pi")
 - ✅ Enable SSH
 - ✅ Set username and password → username: `pi`, password: something you'll remember
 - ✅ Configure WiFi → enter your SSID and password (saves you needing a keyboard/monitor)
