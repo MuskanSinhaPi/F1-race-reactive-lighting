@@ -1,42 +1,25 @@
 #!/usr/bin/env python3
 """
-F1 Live Server — Raspberry Pi
-==============================
-Serves /p1 endpoint to the NodeMCU ESP8266.
+F1 Live Server — PRODUCTION
+=============================
+Data sources:
+  Primary:  ESPN scoreboard API  — live race status, P1 constructor
+  Standings: Jolpica (Ergast)   — driver standings (WDC projection + confirmation)
 
-Response JSON contract:
-{
-  "team":             "McLaren",          # current race P1 constructor
-  "status":           "live",             # live | finished | delayed | cancelled | postponed | scheduled | idle
-  "gp":               "Abu Dhabi Grand Prix",
-  "champion":         "McLaren",          # Pi-projected or confirmed WCC constructor (final race only)
-  "champion_status":  "projected"         # "projected" | "confirmed" | null
-}
+Push format:
+  GET /update?team=X&status=Y [&gp=Z] [&wdc_team=A&wdc_status=projected|confirmed]
 
-champion / champion_status are only populated during the final race weekend.
-For all other races they are omitted entirely so the NodeMCU ignores them.
-
-Data sources (in priority order):
-  1. ESPN scoreboard          — live positions, race status, fastest lap
-  2. Jolpica driver standings — round tracking
-  3. Jolpica constructor standings — truth source for WCC champion confirmation
-
-Season logic:
-  - Before final race weekend: standings fetched once, cached as base_points
-  - During final race: live ESPN positions applied to base_points each poll
-  - champion_status = "projected" while maths gives a clear winner
-  - champion_status = "confirmed" once Jolpica constructor standings round == total_rounds
+Pi:      192.168.1.53:8080
+NodeMCU: 192.168.1.55:8080
 """
 
 import time
-import json
 import logging
 import threading
+import requests
 from datetime import datetime, timezone
 from flask import Flask, jsonify
-import requests
 
-# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -46,570 +29,649 @@ log = logging.getLogger("f1")
 
 app = Flask(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-ESPN_SCOREBOARD              = "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard"
-JOLPICA_DRIVER_STANDINGS     = "https://api.jolpi.ca/ergast/f1/current/driverStandings.json"
-JOLPICA_CONSTRUCTOR_STANDINGS = "https://api.jolpi.ca/ergast/f1/current/constructorStandings.json"  # FIX #2
-JOLPICA_SCHEDULE             = "https://api.jolpi.ca/ergast/f1/current.json"
+NODEMCU_IP   = "192.168.1.55"
+NODEMCU_PORT = 8080
 
-POLL_INTERVAL        = 10    # seconds between ESPN polls during race
-CHAMP_POLL_SECS      = 90    # seconds between Jolpica champion confirmation polls
-ROUND_CHECK_INTERVAL = 300   # seconds between periodic current-round checks (#1)
-REQUEST_TIMEOUT      = 6     # HTTP timeout
+ESPN_URL     = "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard"
+JOLPICA_BASE = "https://api.jolpi.ca/ergast/f1"
 
-# Points tables
-RACE_POINTS   = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
-SPRINT_POINTS = [8,  7,  6,  5,  4,  3, 2, 1]
+POLL_NORMAL  = 60
+POLL_RACE    = 10
+POLL_FINISH  = 15
+CHAMP_POLL_S = 120
+STANDINGS_SEED_LEAD_S = 21600
+RACE_POINTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
 
-# ── Shared state (all access via state_lock) ──────────────────────────────────
-state_lock = threading.Lock()
-
-state = {
-    # Latest data served to NodeMCU
-    "team":             "---",
-    "status":           "idle",       # idle | scheduled | live | finished | delayed | cancelled | postponed
-    "gp":               "",
-
-    # Champion fields — only populated on final race weekend
-    "champion":         None,
-    "champion_status":  None,         # "projected" | "confirmed"
-
-    # Internal tracking
-    "total_rounds":     24,
-    "current_round":    0,
-    "is_final_round":   False,
-    "race_finished":    False,
-
-    # Base standings fetched before final race (driver_id -> points)
-    "base_driver_points": {},         # {"VER": 400, "NOR": 380, ...}
-    # Driver -> constructor mapping from standings
-    "driver_constructor": {},         # {"VER": "Red Bull", "NOR": "McLaren", ...}
-    # Constructor -> aggregated base points
-    "base_constructor_points": {},    # {"Red Bull": 600, "McLaren": 580, ...}
-
-    "standings_fetched":    False,
-    "champion_confirmed":   False,
-    "confirmed_champion":   None,     # constructor name once Jolpica confirms
-
-    "last_espn_poll":   0,
-    "last_champ_poll":  0,
-    "last_round_check": 0,   # FIX #1: tracks periodic round re-checks
-}
-
-# ── Constructor name normalisation ────────────────────────────────────────────
 CONSTRUCTOR_MAP = {
-    "red bull racing":       "Red Bull",
-    "red bull":              "Red Bull",
-    "mclaren":               "McLaren",
-    "mclaren f1 team":       "McLaren",
-    "mercedes":              "Mercedes",
-    "mercedes-amg petronas": "Mercedes",
-    "ferrari":               "Ferrari",
-    "scuderia ferrari":      "Ferrari",
-    "aston martin":          "Aston Martin",
-    "aston martin aramco":   "Aston Martin",
-    "alpine":                "Alpine",
-    "alpine f1 team":        "Alpine",
-    "haas":                  "Haas",
-    "haas f1 team":          "Haas",
-    "williams":              "Williams",
-    "williams racing":       "Williams",
-    "racing bulls":          "Racing Bulls",
-    "visa cashapp rb":       "Racing Bulls",
-    "rb f1 team":            "Racing Bulls",
-    "sauber":                "Audi",
-    "stake f1":              "Audi",
-    "audi":                  "Audi",
-    "cadillac":              "Cadillac",
-    "andretti cadillac":     "Cadillac",
+    "red bull racing":        "Red Bull",
+    "red bull":               "Red Bull",
+    "oracle red bull racing": "Red Bull",
+    "mclaren":                "McLaren",
+    "mclaren f1 team":        "McLaren",
+    "mercedes":               "Mercedes",
+    "mercedes-amg petronas":  "Mercedes",
+    "ferrari":                "Ferrari",
+    "scuderia ferrari":       "Ferrari",
+    "aston martin":           "Aston Martin",
+    "aston martin aramco":    "Aston Martin",
+    "alpine":                 "Alpine",
+    "alpine f1 team":         "Alpine",
+    "haas":                   "Haas",
+    "haas f1 team":           "Haas",
+    "williams":               "Williams",
+    "williams racing":        "Williams",
+    "racing bulls":           "Racing Bulls",
+    "visa cashapp rb":        "Racing Bulls",
+    "rb f1 team":             "Racing Bulls",
+    "sauber":                 "Audi",
+    "stake f1":               "Audi",
+    "audi":                   "Audi",
+    "cadillac":               "Cadillac",
+    "andretti cadillac":      "Cadillac",
+    "twg cadillac":           "Cadillac",
 }
 
-def norm_constructor(name: str) -> str:
-    """Normalise constructor name to canonical form."""
+def norm(name: str) -> str:
     if not name:
-        return name
+        return ""
     return CONSTRUCTOR_MAP.get(name.lower().strip(), name.strip())
 
+_last_push_key  = None
+_last_push_lock = threading.Lock()
 
-# ── Schedule helpers ──────────────────────────────────────────────────────────
+def push_update(team: str, status: str,
+                wdc_team: str = None, wdc_status: str = None,
+                gp: str = None):
+    global _last_push_key
+    push_key = (team, status, wdc_team, wdc_status, gp)
+
+    # finished and confirmed-WDC are one-time events — never dedup them.
+    # All other statuses are deduplicated so we don't spam the NodeMCU
+    # with identical live/scheduled/idle pushes every poll cycle.
+    is_critical = (status == "finished" or wdc_status == "confirmed")
+
+    if not is_critical:
+        with _last_push_lock:
+            if _last_push_key == push_key:
+                log.debug(f"[PUSH] dedup skip — {status} {team}")
+                return
+            _last_push_key = push_key
+
+    try:
+        params = f"team={team.replace(' ', '+')}&status={status}"
+        if gp:         params += f"&gp={gp.replace(' ', '+')}"
+        if wdc_team:   params += f"&wdc_team={wdc_team.replace(' ', '+')}"
+        if wdc_status: params += f"&wdc_status={wdc_status}"
+        url = f"http://{NODEMCU_IP}:{NODEMCU_PORT}/update?{params}"
+        log.info(f"[PUSH] -> {url}")
+        r = requests.get(url, timeout=2)
+        log.info(f"[PUSH] OK {r.status_code}")
+
+        # For critical events, update dedup key only on success so
+        # a failed push will be retried on the next poll cycle
+        if is_critical:
+            with _last_push_lock:
+                _last_push_key = push_key
+
+    except Exception as e:
+        log.error(f"[PUSH] FAILED — {e}")
+        # Non-critical: clear dedup so next poll retries
+        # Critical: dedup key was never set, so next poll retries automatically
+        if not is_critical:
+            with _last_push_lock:
+                _last_push_key = None
+
+def reset_push_dedup():
+    global _last_push_key
+    with _last_push_lock:
+        _last_push_key = None
+
+_lock = threading.Lock()
+
+state = {
+    "status":        "idle",
+    "team":          "---",
+    "gp":            "",
+    "race_finished": False,
+    "current_round":  0,
+    "total_rounds":   24,
+    "is_final_round": False,
+    "race_start_utc": None,
+    "wdc_driver":      None,
+    "wdc_driver_team": None,
+    "wdc_status":      None,
+    "wdc_confirmed":   False,
+    "base_driver_points": {},
+    "driver_constructor": {},
+    "standings_seeded_at_round": 0,
+    "pre_race_seed_done": False,
+    "pre_race_seed_time": None,
+    "last_poll":       0,
+    "last_champ_poll": 0,
+}
 
 def fetch_schedule():
-    """Fetch current season schedule, set total_rounds."""
+    """Fetch total rounds for current season from current.json.
+    Uses limit=1 to minimise response size — MRData.total is always
+    the full season race count regardless of limit.
+    """
     try:
-        r = requests.get(JOLPICA_SCHEDULE, timeout=REQUEST_TIMEOUT)
+        r = requests.get(f"{JOLPICA_BASE}/current.json?limit=1", timeout=10)
         r.raise_for_status()
-        data = r.json()
-        races = data["MRData"]["RaceTable"]["Races"]
-        total = len(races)
-        with state_lock:
+        total = int(r.json()["MRData"]["total"])
+        with _lock:
             state["total_rounds"] = total
-        log.info(f"Schedule: {total} rounds this season")
-        return races
+        log.info(f"[Jolpica] season total: {total} rounds")
     except Exception as e:
-        log.warning(f"Schedule fetch failed: {e}")
-        return []
+        log.error(f"[Jolpica] schedule fetch failed: {e}")
 
 
-def check_if_final_round():
-    """
-    Determine current round from Jolpica driver standings and flag if final.
-
-    FIX #1: Use strict equality (current_round == total_rounds - 1) rather than
-    >= to avoid mis-flagging if Jolpica updates early or late.
+def fetch_next_race_info():
+    """Fetch next race start time and current round.
+    FIX: does NOT use MRData.total from next.json to set total_rounds
+    because next.json always returns total=1 (count of results, not
+    season length). total_rounds is set by fetch_schedule() only.
+    is_final_round is derived by comparing round against total_rounds
+    already set by fetch_schedule().
     """
     try:
-        r = requests.get(JOLPICA_DRIVER_STANDINGS, timeout=REQUEST_TIMEOUT)
+        r = requests.get(f"{JOLPICA_BASE}/current/next.json", timeout=10)
         r.raise_for_status()
-        data = r.json()
-        lists = data["MRData"]["StandingsTable"]["StandingsLists"]
-        if not lists:
+        data  = r.json()
+        races = data["MRData"]["RaceTable"]["Races"]
+        if not races:
+            log.info("[Jolpica] no next race found (end of season?)")
             return
-        current_round = int(lists[0].get("round", 0))
-        with state_lock:
-            total = state["total_rounds"]
-            state["current_round"] = current_round
-            # FIX #1: strict equality — avoids off-by-one on early/late Jolpica updates
-            state["is_final_round"] = (current_round == total - 1)
-            log.info(f"Current round: {current_round}/{total} "
-                     f"— final: {state['is_final_round']}")
+        race     = races[0]
+        rnd      = int(race["round"])
+        date_str = race.get("date", "")
+        time_str = race.get("time", "00:00:00Z")
+
+        race_start = None
+        if date_str:
+            try:
+                combined = f"{date_str}T{time_str}".replace("Z", "+00:00")
+                race_start = datetime.fromisoformat(combined)
+            except Exception:
+                pass
+
+        with _lock:
+            total_rounds = state["total_rounds"]   # set by fetch_schedule()
+            # next.json "round" is the UPCOMING round, so completed = round - 1
+            state["current_round"]  = rnd - 1
+            state["is_final_round"] = (rnd == total_rounds)
+            if race_start:
+                state["race_start_utc"] = race_start
+                seed_time = race_start.timestamp() - STANDINGS_SEED_LEAD_S
+                state["pre_race_seed_time"] = seed_time
+                state["pre_race_seed_done"] = False
+            is_final = state["is_final_round"]
+
+        log.info(f"[Jolpica] next race: round {rnd}/{total_rounds}  "
+                 f"final={is_final}  start={race_start}")
     except Exception as e:
-        log.warning(f"Round check failed: {e}")
+        log.error(f"[Jolpica] next race fetch failed: {e}")
 
 
-# ── Standings helpers ─────────────────────────────────────────────────────────
-
-def fetch_base_standings():
-    """
-    Fetch current driverStandings and build base_driver_points,
-    driver_constructor, and base_constructor_points.
-    Called once before the final race starts.
-    """
+def fetch_driver_standings() -> dict:
     try:
-        r = requests.get(JOLPICA_DRIVER_STANDINGS, timeout=REQUEST_TIMEOUT)
+        r = requests.get(
+            f"{JOLPICA_BASE}/current/driverStandings.json", timeout=10)
         r.raise_for_status()
-        data = r.json()
+        data  = r.json()
         lists = data["MRData"]["StandingsTable"]["StandingsLists"]
         if not lists:
-            log.warning("No standings lists returned")
-            return False
-
-        driver_points = {}
-        driver_constructor = {}
-        constructor_points = {}
-
-        for entry in lists[0].get("DriverStandings", []):
-            driver_id = entry["Driver"]["driverId"].upper()
-            points    = float(entry.get("points", 0))
-            constructors = entry.get("Constructors", [])
-            if constructors:
-                cname = norm_constructor(constructors[-1]["name"])
-            else:
-                cname = "Unknown"
-
-            driver_points[driver_id]      = points
-            driver_constructor[driver_id] = cname
-            constructor_points[cname]     = constructor_points.get(cname, 0) + points
-
-        with state_lock:
-            state["base_driver_points"]      = driver_points
-            state["driver_constructor"]      = driver_constructor
-            state["base_constructor_points"] = constructor_points
-            state["standings_fetched"]       = True
-
-        log.info(f"Base standings loaded — {len(driver_points)} drivers")
-        top = sorted(constructor_points.items(), key=lambda x: x[1], reverse=True)[:5]
-        for name, pts in top:
-            log.info(f"  {name}: {pts} pts")
-        return True
-
+            return {}
+        sl  = lists[0]
+        rnd = int(sl["round"])
+        standings = []
+        for s in sl["DriverStandings"]:
+            d    = s["Driver"]
+            cons = s.get("Constructors", [{}])
+            standings.append({
+                "driver_id":   d["driverId"],
+                "driver_name": f"{d['givenName']} {d['familyName']}",
+                "constructor": norm(cons[0].get("name", "") if cons else ""),
+                "points":      float(s["points"]),
+                "position":    int(s["position"]),
+            })
+        return {"round": rnd, "standings": standings}
     except Exception as e:
-        log.error(f"Base standings fetch failed: {e}")
-        return False
+        log.error(f"[Jolpica] driver standings failed: {e}")
+        return {}
 
 
-def project_champion(live_results: list) -> str | None:
-    """
-    Given live_results, apply race points on top of base standings and return
-    projected constructor champion name, or None if no clear leader.
-    """
-    with state_lock:
-        base = dict(state["base_constructor_points"])
-        driver_constructor = dict(state["driver_constructor"])
+def seed_driver_standings_for_final_race():
+    log.info("[Standings] seeding driver standings for WDC projection...")
+    ds = fetch_driver_standings()
+    if not ds.get("standings"):
+        log.error("[Standings] failed to seed — WDC projection unavailable")
+        return
+    rnd = ds["round"]
+    with _lock:
+        state["base_driver_points"] = {
+            s["driver_id"]: s["points"] for s in ds["standings"]}
+        state["driver_constructor"] = {
+            s["driver_id"]: s["constructor"] for s in ds["standings"]}
+        state["standings_seeded_at_round"] = rnd
+        state["pre_race_seed_done"] = True
+    top5 = ds["standings"][:5]
+    log.info(f"[Standings] seeded at round {rnd} — top 5:")
+    for s in top5:
+        log.info(f"  P{s['position']} {s['driver_name']} ({s['constructor']}) {s['points']:.0f}pts")
 
-    if not base:
-        return None
 
-    projected = dict(base)
-    classified = [r for r in live_results if r.get("classified", True)]
+def project_wdc_from_live(competitors: list) -> tuple:
+    with _lock:
+        base_pts   = dict(state["base_driver_points"])
+        driver_con = dict(state["driver_constructor"])
+        seed_rnd   = state["standings_seeded_at_round"]
 
-    for i, result in enumerate(classified):
+    if not base_pts:
+        log.warning("[WDC proj] base standings not seeded — cannot project")
+        return None, None
+
+    con_drivers: dict = {}
+    for did, con in driver_con.items():
+        con_drivers.setdefault(con, []).append((base_pts.get(did, 0), did))
+    for con in con_drivers:
+        con_drivers[con].sort(reverse=True)
+
+    projected    = dict(base_pts)
+    con_assigned: dict = {}
+    classified   = [c for c in competitors if c.get("classified", True)]
+
+    for i, c in enumerate(classified):
         if i >= len(RACE_POINTS):
             break
-        constructor = result.get("constructor") or driver_constructor.get(
-            result.get("driver_id", "").upper(), "")
-        constructor = norm_constructor(constructor)
-        if not constructor:
+        cname   = c.get("constructor", "")
+        drivers = con_drivers.get(cname, [])
+        if not drivers:
+            continue
+        slot = con_assigned.get(cname, 0)
+        if slot >= len(drivers):
             continue
         pts = RACE_POINTS[i]
-        if result.get("fastest_lap") and i < 10:
+        if c.get("fastest_lap") and i < 10:
             pts += 1
-        projected[constructor] = projected.get(constructor, 0) + pts
+        _, did = drivers[slot]
+        projected[did] = projected.get(did, 0) + pts
+        con_assigned[cname] = slot + 1
 
     if not projected:
-        return None
-    sorted_teams = sorted(projected.items(), key=lambda x: x[1], reverse=True)
-    leader = sorted_teams[0]
-    second = sorted_teams[1] if len(sorted_teams) > 1 else None
+        return None, None
 
-    log.debug(f"Projected: {leader[0]} {leader[1]:.0f}pts"
-              + (f" vs {second[0]} {second[1]:.0f}pts" if second else ""))
+    leader_id  = max(projected, key=lambda x: projected[x])
+    leader_con = driver_con.get(leader_id, "")
+    pts_sorted = sorted(projected.values(), reverse=True)
+    gap        = pts_sorted[0] - pts_sorted[1] if len(pts_sorted) > 1 else 0
+    log.info(f"[WDC proj] {leader_id} ({leader_con}) {pts_sorted[0]:.0f}pts (gap:+{gap:.0f})")
+    return leader_id, leader_con
 
-    return leader[0]
+
+def poll_wdc_confirmation():
+    log.info("[WDC poll] checking Jolpica for WDC confirmation...")
+    ds = fetch_driver_standings()
+    if not ds.get("standings"):
+        log.warning("[WDC poll] no standings returned")
+        return
+
+    with _lock:
+        total_rounds = state["total_rounds"]
+        wdc_done     = state["wdc_confirmed"]
+
+    if wdc_done:
+        return
+
+    if ds.get("round", 0) < total_rounds:
+        log.info(f"[WDC poll] standings at round {ds['round']}, need {total_rounds} — waiting")
+        return
+
+    leader = ds["standings"][0]
+    log.info(f"[WDC] CONFIRMED: {leader['driver_name']} ({leader['constructor']})")
+
+    with _lock:
+        state["wdc_driver"]      = leader["driver_name"]
+        state["wdc_driver_team"] = leader["constructor"]
+        state["wdc_status"]      = "confirmed"
+        state["wdc_confirmed"]   = True
+        current_team = state["team"]
+        gp           = state["gp"]
+
+    reset_push_dedup()
+    push_update(current_team or "---", "finished",
+                wdc_team=leader["constructor"],
+                wdc_status="confirmed",
+                gp=gp)
 
 
-def try_confirm_champion_jolpica() -> str | None:
-    """
-    Poll Jolpica CONSTRUCTOR standings (not driver standings).
-    Returns confirmed constructor name if standingsRound == total_rounds,
-    otherwise None.
-
-    FIX #2: Uses constructorStandings endpoint for official WCC confirmation
-    instead of deriving from driver P1's constructor (which is not guaranteed correct).
-    """
+def fetch_espn() -> dict | None:
     try:
-        r = requests.get(JOLPICA_CONSTRUCTOR_STANDINGS, timeout=REQUEST_TIMEOUT)
+        r = requests.get(ESPN_URL, timeout=8)
         r.raise_for_status()
-        data = r.json()
-        lists = data["MRData"]["StandingsTable"]["StandingsLists"]
-        if not lists:
-            return None
-
-        standings_round = int(lists[0].get("round", 0))
-        with state_lock:
-            total   = state["total_rounds"]
-            current = state["current_round"]
-
-        if standings_round < current:
-            log.info(f"Jolpica constructor standings at round {standings_round}, need {current} — waiting")
-            return None
-
-        if standings_round < total:
-            log.info(f"Jolpica constructor round {standings_round}/{total} — not final round yet")
-            return None
-
-        # FIX #2: read directly from ConstructorStandings P1 entry
-        constructor_standings = lists[0].get("ConstructorStandings", [])
-        if not constructor_standings:
-            return None
-        p1 = constructor_standings[0]
-        champion = norm_constructor(p1["Constructor"]["name"])
-        log.info(f"Jolpica confirms WCC: {champion} (round {standings_round})")
-        return champion
-
+        return r.json()
     except Exception as e:
-        log.warning(f"Jolpica champion confirm failed: {e}")
+        log.error(f"[ESPN] fetch failed: {e}")
         return None
 
 
-# ── ESPN polling ──────────────────────────────────────────────────────────────
-
-def parse_espn_scoreboard() -> dict | None:
-    """
-    Fetch ESPN F1 scoreboard. Returns parsed result dict or None on failure.
-
-    FIX #3: driver_id from ESPN shortName is fragile vs Ergast driverId — noted
-             but acceptable since constructor fallback already handles it correctly.
-    FIX #5: espn_status "pre" replaced with "scheduled" to match API contract.
-    FIX #6: Added STATUS_CANCELED and STATUS_POSTPONED handling.
-    """
+def parse_espn(data: dict) -> dict | None:
     try:
-        r = requests.get(ESPN_SCOREBOARD, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-
         events = data.get("events", [])
         if not events:
             return None
+        event = events[0]
+        gp    = event.get("name", "")
 
-        # FIX #2: prefer the event whose name contains "Grand Prix" to avoid
-        # accidentally picking a practice session or sprint event when ESPN
-        # returns multiple competitions in the same weekend.
-        event = next(
-            (e for e in events if "Grand Prix" in e.get("name", "")),
-            events[0]   # fall back to first event if no explicit GP match
-        )
-        gp_name = event.get("name", "")
         competitions = event.get("competitions", [])
-
-        # Find the race competition (type id == "3")
-        race_comp = None
-        for comp in competitions:
-            if comp.get("type", {}).get("id") == "3":
-                race_comp = comp
-                break
-        if not race_comp:
-            race_comp = competitions[0] if competitions else None
+        race_comp = next(
+            (c for c in competitions if c.get("type", {}).get("id") == "3"),
+            competitions[0] if competitions else None
+        )
         if not race_comp:
             return None
 
-        status_obj  = race_comp.get("status", {})
-        status_type = status_obj.get("type", {})
-        status_name = status_type.get("name", "")
-        completed   = status_type.get("completed", False)
+        stype       = race_comp.get("status", {}).get("type", {})
+        status_name = stype.get("name", "")
+        completed   = stype.get("completed", False)
 
-        # FIX #5: "pre" → "scheduled" to match documented contract
-        # FIX #6: added cancelled and postponed mappings
-        if status_name in ("STATUS_SCHEDULED",):
-            espn_status = "scheduled"
+        if completed or status_name == "STATUS_FINAL":
+            status = "finished"
+        elif status_name in ("STATUS_IN_PROGRESS", "STATUS_LIVE"):
+            status = "live"
         elif status_name == "STATUS_DELAYED":
-            espn_status = "delayed"
-        elif status_name == "STATUS_IN_PROGRESS":
-            espn_status = "live"
-        elif status_name in ("STATUS_FINAL", "STATUS_FINAL_OVERTIME"):
-            espn_status = "finished"
-        elif status_name == "STATUS_CANCELED":           # FIX #6
-            espn_status = "cancelled"
-        elif status_name == "STATUS_POSTPONED":          # FIX #6
-            espn_status = "postponed"
+            status = "delayed"
+        elif status_name == "STATUS_POSTPONED":
+            status = "postponed"
+        elif status_name == "STATUS_CANCELED":
+            status = "cancelled"
+        elif status_name in ("STATUS_SCHEDULED", "STATUS_PRE_RACE"):
+            status = "scheduled"
         else:
-            espn_status = "scheduled"
+            status = "idle"
 
         competitors = []
-        for comp in race_comp.get("competitors", []):
-            pos      = comp.get("order", 99)
-            athlete  = comp.get("athlete", {})
-            # FIX #3: driver_id kept for potential future use but constructor
-            # is the primary key; ESPN shortName ≠ Ergast driverId so we don't
-            # rely on it for standings lookups.
-            driver_id = athlete.get("shortName", "").upper().replace(" ", "")
-            team_obj   = comp.get("team", {})
-            constructor = norm_constructor(team_obj.get("displayName", ""))
-
-            fastest_lap = False
-            for stat in comp.get("statistics", []):
-                if stat.get("name", "").lower() in ("fastest lap", "fastestlap"):
-                    fastest_lap = stat.get("value") == "1"
-
-            comp_status = comp.get("status", {}).get("type", {}).get("name", "")
-            classified  = comp_status not in ("DNF", "DNS", "DSQ", "NC", "EX")
-
+        for c in race_comp.get("competitors", []):
+            team_name = ""
+            athlete = c.get("athlete", {})
+            if athlete:
+                team_name = athlete.get("team", {}).get("displayName", "")
+            if not team_name:
+                team_name = c.get("vehicle", {}).get("manufacturer", "")
+            if not team_name:
+                team_name = c.get("team", {}).get("displayName", "")
             competitors.append({
-                "pos":         pos,
-                "driver_id":   driver_id,
-                "constructor": constructor,
-                "fastest_lap": fastest_lap,
-                "classified":  classified,
+                "pos":         int(c.get("order", c.get("pos", 99))),
+                "constructor": norm(team_name),
+                "fastest_lap": c.get("fastest", False),
+                "classified":  c.get("status", {}).get("type", {}).get("id", "") != "DNF",
             })
-
         competitors.sort(key=lambda x: x["pos"])
 
-        return {
-            "status":      espn_status,
-            "completed":   completed or (espn_status == "finished"),
-            "gp":          gp_name,
-            "competitors": competitors,
-        }
+        start_utc = None
+        date_str = race_comp.get("date", "")
+        if date_str:
+            try:
+                start_utc = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            except Exception:
+                pass
 
+        return {
+            "status":      status,
+            "gp":          gp,
+            "completed":   completed,
+            "competitors": competitors,
+            "start_utc":   start_utc,
+        }
     except Exception as e:
-        log.warning(f"ESPN fetch failed: {e}")
+        log.error(f"[ESPN] parse error: {e}")
         return None
 
 
-# ── Background polling thread ─────────────────────────────────────────────────
+def in_race_window() -> bool:
+    with _lock:
+        start  = state.get("race_start_utc")
+        status = state["status"]
+    if status in ("live", "delayed"):
+        return True
+    if start is None:
+        return False
+    now   = datetime.now(timezone.utc)
+    delta = (start - now).total_seconds()
+    return -7200 < delta < 14400
+
 
 def poll_loop():
-    """Background thread — polls ESPN every POLL_INTERVAL seconds."""
-    log.info("Poll loop started")
+    log.info("=" * 62)
+    log.info("  F1 LIVE SERVER — PRODUCTION")
+    log.info(f"  Pi 192.168.1.53:8080  →  NodeMCU {NODEMCU_IP}:{NODEMCU_PORT}")
+    log.info("=" * 62)
 
+    # fetch_schedule MUST run before fetch_next_race_info so total_rounds
+    # is correct before is_final_round is calculated
     fetch_schedule()
-    check_if_final_round()
+    fetch_next_race_info()
+    threading.Thread(
+        target=seed_driver_standings_for_final_race, daemon=True).start()
 
     while True:
-        now = time.time()
+        now_ts = time.time()
 
-        with state_lock:
-            last_poll       = state["last_espn_poll"]
-            last_champ      = state["last_champ_poll"]
-            last_round_chk  = state["last_round_check"]
-            race_finished   = state["race_finished"]
-            champ_confirmed = state["champion_confirmed"]
-            is_final        = state["is_final_round"]
-            standings_ok    = state["standings_fetched"]
+        with _lock:
+            last_poll   = state["last_poll"]
+            status      = state["status"]
+            race_fin    = state["race_finished"]
+            is_final    = state["is_final_round"]
+            wdc_done    = state["wdc_confirmed"]
+            last_champ  = state["last_champ_poll"]
+            seed_done   = state["pre_race_seed_done"]
+            seed_time   = state["pre_race_seed_time"]
 
-        # FIX #1: re-check current round periodically so is_final_round stays
-        # accurate if the Pi runs across multiple race weekends without a restart.
-        if now - last_round_chk >= ROUND_CHECK_INTERVAL:
-            with state_lock:
-                state["last_round_check"] = now
-            check_if_final_round()
-            # Re-read is_final after update
-            with state_lock:
-                is_final     = state["is_final_round"]
-                standings_ok = state["standings_fetched"]
+        if is_final and not seed_done and seed_time is not None:
+            if now_ts >= seed_time:
+                log.info("[Standings] 6h pre-race seed triggered")
+                threading.Thread(
+                    target=seed_driver_standings_for_final_race, daemon=True).start()
+                with _lock:
+                    state["pre_race_seed_done"] = True
 
-        if is_final and not standings_ok:
-            log.info("Final round detected — fetching base standings")
-            fetch_base_standings()
+        if status in ("live", "delayed") or in_race_window():
+            interval = POLL_RACE
+        elif status == "finished" and not race_fin:
+            interval = POLL_FINISH
+        else:
+            interval = POLL_NORMAL
 
-        if now - last_poll >= POLL_INTERVAL:
-            with state_lock:
-                state["last_espn_poll"] = now
+        if now_ts - last_poll >= interval:
+            with _lock:
+                state["last_poll"] = now_ts
+            _do_poll()
 
-            espn = parse_espn_scoreboard()
+        with _lock:
+            is_final = state["is_final_round"]
+            race_fin = state["race_finished"]
+            wdc_done = state["wdc_confirmed"]
 
-            # FIX #4: reset to idle when ESPN returns no data, preventing stale state
-            if espn is None:
-                with state_lock:
-                    state["status"] = "idle"
-                    state["team"]   = "---"
-                    state["gp"]     = ""     # FIX #3: clear stale GP name on idle
-                log.warning("ESPN returned no data — state reset to idle")
-            else:
-                _process_espn(espn)
+        if is_final and race_fin and not wdc_done:
+            if now_ts - last_champ >= CHAMP_POLL_S:
+                with _lock:
+                    state["last_champ_poll"] = now_ts
+                poll_wdc_confirmation()
 
-        # Champion confirmation poll (every CHAMP_POLL_SECS, after race ends)
-        if race_finished and not champ_confirmed and is_final:
-            if now - last_champ >= CHAMP_POLL_SECS:
-                with state_lock:
-                    state["last_champ_poll"] = now
-                confirmed = try_confirm_champion_jolpica()
-                if confirmed:
-                    with state_lock:
-                        state["champion_confirmed"] = True
-                        state["confirmed_champion"] = confirmed
-                        state["champion"]           = confirmed
-                        state["champion_status"]    = "confirmed"
-                    log.info(f"WCC confirmed and set: {confirmed}")
-
-        time.sleep(2)
+        time.sleep(1)
 
 
-def _process_espn(espn: dict):
-    """
-    Apply ESPN data to state. Called from poll_loop.
+def _do_poll():
+    data = fetch_espn()
+    if data is None:
+        with _lock:
+            cur = state["status"]
+        if cur not in ("finished", "idle", "cancelled", "postponed"):
+            with _lock:
+                state["status"] = "idle"
+            push_update("---", "idle")
+        return
+    parsed = parse_espn(data)
+    if parsed:
+        _process(parsed)
 
-    FIX #5: Removed "pre" status; now uses "scheduled" from parse step.
-    FIX #6: Added cancelled/postponed branches.
-    FIX #7: All reads and writes tightly scoped under state_lock.
-    """
-    gp          = espn["gp"]
-    espn_status = espn["status"]
-    completed   = espn["completed"]
-    competitors = espn["competitors"]
 
-    p1_constructor = None
-    if competitors:
-        p1_constructor = norm_constructor(competitors[0].get("constructor", ""))
+def _process(parsed: dict):
+    gp          = parsed["gp"]
+    status      = parsed["status"]
+    competitors = parsed["competitors"]
+    start_utc   = parsed["start_utc"]
+    p1          = competitors[0]["constructor"] if competitors else ""
 
-    # FIX #7: read all needed state in one locked block
-    with state_lock:
-        is_final        = state["is_final_round"]
-        champ_confirmed = state["champion_confirmed"]
-        confirmed_champ = state["confirmed_champion"]
-        current_team    = state["team"]
+    with _lock:
+        is_final = state["is_final_round"]
+        wdc_done = state["wdc_confirmed"]
 
-    # ── Update GP name atomically ─────────────────────────────────────────────
+    if start_utc:
+        with _lock:
+            state["race_start_utc"] = start_utc
+            seed_done = state["pre_race_seed_done"]
+            if is_final and not seed_done and state["pre_race_seed_time"] is None:
+                seed_time = start_utc.timestamp() - STANDINGS_SEED_LEAD_S
+                state["pre_race_seed_time"] = seed_time
+                log.info(f"[Standings] seed scheduled for {datetime.fromtimestamp(seed_time)}")
+
     if gp:
-        with state_lock:
+        with _lock:
             state["gp"] = gp
 
-    # ── Cancelled / Postponed ─────────────────────────────────────────────────
-    if espn_status in ("cancelled", "postponed"):                  # FIX #6
-        with state_lock:
-            state["status"] = espn_status
-        log.info(f"Race {espn_status}")
+    if status in ("cancelled", "postponed"):
+        with _lock:
+            state["status"] = status
+        push_update("---", status, gp=gp)
         return
 
-    # ── Delayed ───────────────────────────────────────────────────────────────
-    if espn_status == "delayed":
-        with state_lock:
+    if status == "delayed":
+        with _lock:
             state["status"] = "delayed"
-            state["team"]   = p1_constructor or current_team
-        log.info("Race delayed")
+            state["team"]   = p1 or state["team"]
+        push_update(p1 or "---", "delayed", gp=gp)
         return
 
-    # ── Pre-race / Scheduled ──────────────────────────────────────────────────
-    if espn_status == "scheduled":                                 # FIX #5
-        with state_lock:
-            state["status"] = "scheduled"
+    if status == "scheduled":
+        with _lock:
+            state["status"]        = "scheduled"
+            state["race_finished"] = False
+        push_update("---", "scheduled", gp=gp)
         return
 
-    # ── Live ──────────────────────────────────────────────────────────────────
-    if espn_status == "live":
-        with state_lock:
+    if status == "live":
+        with _lock:
+            prev_team              = state["team"]
             state["status"]        = "live"
-            state["team"]          = p1_constructor or current_team
+            if p1: state["team"]   = p1
             state["race_finished"] = False
 
-        if is_final and not champ_confirmed and competitors:
-            projected = project_champion(competitors)
-            if projected:
-                with state_lock:
-                    state["champion"]        = projected
-                    state["champion_status"] = "projected"
-                log.info(f"Projected WCC: {projected}")
+        wdc_team = None; wdc_status = None
+        if is_final and competitors and not wdc_done:
+            _, wdc_team = project_wdc_from_live(competitors)
+            if wdc_team:
+                wdc_status = "projected"
+                with _lock:
+                    state["wdc_driver_team"] = wdc_team
+                    state["wdc_status"]      = "projected"
+        elif is_final and wdc_done:
+            with _lock:
+                wdc_team   = state["wdc_driver_team"]
+                wdc_status = "confirmed"
+
+        push_update(p1 or prev_team or "---", "live",
+                    wdc_team=wdc_team, wdc_status=wdc_status, gp=gp)
         return
 
-    # ── Finished ──────────────────────────────────────────────────────────────
-    if completed or espn_status == "finished":
-        with state_lock:
-            already_finished = state["race_finished"]
-
-        if not already_finished:
-            log.info(f"Race finished — P1: {p1_constructor}")
-
-        with state_lock:
+    if status == "finished":
+        with _lock:
+            already   = state["race_finished"]
+            prev_team = state["team"]
+        if not already:
+            log.info(f"Race finished — P1: {p1}  GP: {gp}")
+        with _lock:
             state["status"]        = "finished"
-            state["team"]          = p1_constructor or current_team
+            if p1: state["team"]   = p1
             state["race_finished"] = True
 
-        if is_final and not champ_confirmed and competitors:
-            projected = project_champion(competitors)
-            if projected:
-                with state_lock:
-                    state["champion"]        = projected
-                    state["champion_status"] = "projected"
-                log.info(f"Race finished — projected WCC: {projected}")
+        wdc_team = None; wdc_status = None
+        if is_final and competitors and not wdc_done:
+            _, wdc_team = project_wdc_from_live(competitors)
+            if wdc_team:
+                wdc_status = "projected"
+                with _lock:
+                    state["wdc_driver_team"] = wdc_team
+                    state["wdc_status"]      = "projected"
+        elif is_final and wdc_done:
+            with _lock:
+                wdc_team   = state["wdc_driver_team"]
+                wdc_status = "confirmed"
 
-        if is_final and champ_confirmed and confirmed_champ:
-            with state_lock:
-                state["champion"]        = confirmed_champ
-                state["champion_status"] = "confirmed"
+        push_update(p1 or prev_team or "---", "finished",
+                    wdc_team=wdc_team, wdc_status=wdc_status, gp=gp)
 
-
-# ── Flask endpoints ───────────────────────────────────────────────────────────
 
 @app.route("/p1")
-def p1():
-    with state_lock:
+def p1_endpoint():
+    with _lock:
         s = dict(state)
-
     resp = {
-        "team":   s["team"]   or "---",
-        "status": s["status"] or "idle",
-        "gp":     s["gp"]     or "",
+        "team":               s.get("team", "---"),
+        "status":             s.get("status", "idle"),
+        "gp":                 s.get("gp", ""),
+        "round":              s.get("current_round", 0),
+        "total":              s.get("total_rounds", 24),
+        "is_final_round":     s.get("is_final_round", False),
+        "standings_round":    s.get("standings_seeded_at_round", 0),
+        "pre_race_seed_done": s.get("pre_race_seed_done", False),
     }
-
-    if s["is_final_round"] and s["champion"]:
-        resp["champion"]        = s["champion"]
-        resp["champion_status"] = s["champion_status"]
-
+    if s.get("wdc_driver_team"):
+        resp["wdc_team"]   = s["wdc_driver_team"]
+        resp["wdc_driver"] = s.get("wdc_driver", "")
+        resp["wdc_status"] = s.get("wdc_status", "")
     return jsonify(resp)
 
 
 @app.route("/status")
-def status():
-    """Debug endpoint — full internal state (excludes large lookup tables)."""
-    with state_lock:
-        return jsonify({k: v for k, v in state.items()
-                        if k not in ("base_driver_points",
-                                     "driver_constructor",
-                                     "base_constructor_points")})
+def status_endpoint():
+    with _lock:
+        pts   = state.get("base_driver_points", {})
+        d_con = state.get("driver_constructor", {})
+        s     = {k: v for k, v in state.items()
+                 if k not in ("base_driver_points", "driver_constructor")}
+        s["standings_top5"] = [
+            {"driver": did, "constructor": d_con.get(did, ""), "points": f"{p:.0f}"}
+            for did, p in sorted(pts.items(), key=lambda x: -x[1])[:5]
+        ]
+        seed_time = state.get("pre_race_seed_time")
+        s["pre_race_seed_scheduled"] = (
+            datetime.fromtimestamp(seed_time).isoformat() if seed_time else None)
+    with _last_push_lock:
+        s["last_push_key"] = str(_last_push_key)
+    return jsonify(s)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+@app.route("/refresh_standings")
+def refresh_standings():
+    threading.Thread(target=seed_driver_standings_for_final_race, daemon=True).start()
+    return jsonify({"ok": True, "msg": "standings refresh triggered"})
+
+
+@app.route("/force_push")
+def force_push():
+    reset_push_dedup()
+    with _lock:
+        team     = state.get("team", "---")
+        status   = state.get("status", "idle")
+        gp       = state.get("gp", "")
+        wdc_team = state.get("wdc_driver_team")
+        wdc_st   = state.get("wdc_status")
+    push_update(team, status, wdc_team=wdc_team, wdc_status=wdc_st, gp=gp)
+    return jsonify({"ok": True, "pushed": status})
+
 
 if __name__ == "__main__":
     t = threading.Thread(target=poll_loop, daemon=True)
     t.start()
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=8080)
