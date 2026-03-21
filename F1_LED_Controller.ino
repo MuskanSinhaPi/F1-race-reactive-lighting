@@ -783,7 +783,6 @@ void updateClock() {
 }
 
 void updateTeamDisplay(int teamID, bool isLive) {
-  currentTeamID = teamID;
   tft.fillRect(0, 29, 4, 44, teamTFTColor[teamID]);
   tft.fillRect(4, 29, 156, 44, C_PANEL);
   tft.drawRect(4, 29, 156, 44, C_BORDER);
