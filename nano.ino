@@ -2,7 +2,7 @@
 #include <SoftwareSerial.h>
 
 #define STRIP_PIN   6
-#define NUM_LEDS    125
+#define NUM_LEDS    131
 #define ESP_RX_PIN  8
 #define ESP_TX_PIN  9
 
@@ -41,6 +41,14 @@ Color teamColors[] = {
   {  0,  20, 120},  // 10 Red Bull (deep navy)
   {  0, 140, 255},  // 11 Williams
 };
+
+// ================= ACCENT PIXELS =================
+// Stores per-pixel accent colours for teams that have highlight LEDs.
+// doPulse() re-applies these after setting the base colour so they
+// are never wiped by the pulse cycle.
+struct AccentPixel { int index; int r; int g; int b; };
+AccentPixel accentPixels[25];
+int numAccentPixels = 0;
 
 // ==========================================================
 // SETUP
@@ -120,14 +128,15 @@ void handleCommand(int cmd) {
 
   if (cmd == CMD_DISPLAY) {
     pulsing = false;
-    smoothFade(200, 200, 190);  // soft warm white
+    numAccentPixels = 0;   // clear accents — display mode is plain warm white
+    smoothFade(200, 200, 190);
     strip.setBrightness(150);
     strip.show();
     return;
   }
 
   if (cmd >= 1 && cmd <= 11) {
-    pulsing = false;  // stop pulsing on any manual/live team command
+    pulsing = false;
     setTeamColor(cmd);
   }
 }
@@ -137,7 +146,7 @@ void handleCommand(int cmd) {
 // ==========================================================
 
 void setTeamColor(int team) {
-  if (team == currentTeam) return;  // skip if already showing this team
+  if (team == currentTeam) return;  // already showing this team
 
   currentTeam = team;
   Color c = teamColors[team];
@@ -150,24 +159,40 @@ void setTeamColor(int team) {
 
 // ==========================================================
 // ACCENTS
+// Stores accent pixel positions and colours in accentPixels[]
+// so doPulse() can re-apply them each cycle without overwriting.
 // ==========================================================
 
 void applyAccent(int team) {
-  if (team == 4) {          // Haas — red accents
-    for (int i = 0; i < NUM_LEDS; i++)
-      if (i % 12 == 0)
+  numAccentPixels = 0;   // clear previous accent list
+
+  if (team == 4) {          // Haas — red accents on soft white base
+    for (int i = 0; i < NUM_LEDS; i++) {
+      if (i % 12 == 0) {
+        accentPixels[numAccentPixels++] = {i, 220, 0, 0};
         strip.setPixelColor(i, strip.Color(220, 0, 0));
+      }
+    }
   }
-  if (team == 6) {          // Cadillac — blue accents
-    for (int i = 0; i < NUM_LEDS; i++)
-      if (i % 15 == 0)
+
+  if (team == 6) {          // Cadillac — blue accents on silver base
+    for (int i = 0; i < NUM_LEDS; i++) {
+      if (i % 15 == 0) {
+        accentPixels[numAccentPixels++] = {i, 100, 150, 255};
         strip.setPixelColor(i, strip.Color(100, 150, 255));
+      }
+    }
   }
-  if (team == 10) {         // Red Bull — red accents
-    for (int i = 0; i < NUM_LEDS; i++)
-      if (i % 20 == 0)
+
+  if (team == 10) {         // Red Bull — red accents on deep navy base
+    for (int i = 0; i < NUM_LEDS; i++) {
+      if (i % 20 == 0) {
+        accentPixels[numAccentPixels++] = {i, 220, 0, 40};
         strip.setPixelColor(i, strip.Color(220, 0, 40));
+      }
+    }
   }
+
   strip.show();
 }
 
@@ -193,6 +218,8 @@ void smoothFade(int tr, int tg, int tb) {
 
 // ==========================================================
 // PULSE
+// Re-applies accent pixels after setting base colour so they
+// are never overwritten by the pulse cycle.
 // ==========================================================
 
 void doPulse() {
@@ -203,12 +230,24 @@ void doPulse() {
     pulseFactor -= 0.02;
     if (pulseFactor <= 0.3) pulseRising = true;
   }
+
+  // Set all pixels to base team colour at current pulse brightness
   for (int i = 0; i < NUM_LEDS; i++) {
     strip.setPixelColor(i, strip.Color(
       pulseR * pulseFactor,
       pulseG * pulseFactor,
       pulseB * pulseFactor));
   }
+
+  // Re-apply accent pixels at their own colour, pulsed at the same factor
+  // This preserves e.g. Red Bull red flashes, Haas red dots, Cadillac blue dots
+  for (int i = 0; i < numAccentPixels; i++) {
+    strip.setPixelColor(accentPixels[i].index, strip.Color(
+      accentPixels[i].r * pulseFactor,
+      accentPixels[i].g * pulseFactor,
+      accentPixels[i].b * pulseFactor));
+  }
+
   strip.show();
 }
 
@@ -247,7 +286,7 @@ void checkeredWipe() {
       delay(70);
     }
   }
-  currentTeam = -1; // reset so next setTeamColor() always fades correctly
+  currentTeam = -1;  // reset so next setTeamColor() always fades correctly
 }
 
 // ==========================================================
