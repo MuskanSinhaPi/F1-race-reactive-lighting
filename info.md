@@ -771,3 +771,11 @@ Pi       ──LAN──┘
 AP isolation only applies to WiFi↔WiFi. A wired Pi is on the LAN side of the router, so the NodeMCU can reach it freely. Your existing code works as-is, IP stays 192.168.1.45.
 If ethernet isn't possible, the next best option is turning off AP isolation in the router settings — login to your router admin page (usually 192.168.1.1), find "AP Isolation" or "Client Isolation" under the WiFi settings, and disable it. Takes 30 seconds.
 If neither of those is an option (router is ISP-locked and no ethernet port nearby), then WebSocket is the right code approach — but try the hardware fixes first since they're instant and free.
+
+---
+The time sync is hanging because pool.ntp.org is blocked or unreachable from your network. The loop while (now < 100000) waits forever with no timeout.
+Your router is likely blocking UDP port 123 (NTP). Let's use a different NTP server and add a reasonable timeout so the device doesn't hang forever:Edited a file, read a fileEdited a file, read a fileBut the old sketch worked with pool.ntp.org — so something changed on your network. The most likely explanation: the old sketch didn't set a static IP. The new sketch does:
+cppWiFi.config(IPAddress(192,168,1,55), IPAddress(192,168,1,1), IPAddress(255,255,255,0));
+When you set a static IP with WiFi.config() on ESP8266, you must also set a DNS server as the fourth argument, otherwise DNS resolution fails and pool.ntp.org can never be resolved. The NTP library needs DNS to resolve the hostname.
+This is almost certainly the root cause of ALL the issues — NTP failing, Jolpica failing (HTTPS also needs DNS). The old sketch used DHCP which automatically gets DNS from the router.Edited a file, read a fileEdited a file, read a fileThat's the fix. Without a DNS server specified in WiFi.config(), the ESP8266 can't resolve any hostname — pool.ntp.org, api.jolpi.ca, everything fails silently. That's why NTP hangs forever and Jolpica returns HTTP 0.
+The old sketch used WiFi.begin(ssid, password) with no WiFi.config() call, so it got DNS automatically from DHCP. The new sketch set a static IP but forgot the DNS parameter, breaking all hostname resolution.
