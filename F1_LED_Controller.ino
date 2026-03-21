@@ -369,8 +369,8 @@ void setup() {
 
   if (EEPROM.read(EEPROM_INIT_FLAG) != EEPROM_MAGIC) {
     Serial.println("First boot — EEPROM init");
-    EEPROM.write(EEPROM_LAST_RACE,  TEAM_MCLAREN);
-    EEPROM.write(EEPROM_WDC_CHAMP,  0);
+    EEPROM.write(EEPROM_LAST_RACE,  TEAM_MERCEDES);
+    EEPROM.write(EEPROM_WDC_CHAMP,  TEAM_MCLAREN);
     EEPROM.write(EEPROM_SAVED_MODE, MODE_LIVE);
     time_t zero = 0;
     EEPROM.put(EEPROM_LAST_RACE_TIME, zero);
