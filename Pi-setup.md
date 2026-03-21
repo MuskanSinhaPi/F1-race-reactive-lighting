@@ -106,7 +106,7 @@ sudo reboot
 
 Wait 30 seconds, then SSH back in using the new static IP:
 ```bash
-ssh pi@192.168.1.45
+ssh pi@192.168.1.53
 ```
 
 ---
@@ -123,11 +123,11 @@ cd /home/pi/f1
 
 Open a new terminal on your computer (not the SSH session) and run:
 ```bash
-scp /path/to/f1_server.py pi@192.168.1.45:/home/pi/f1/
+scp /path/to/f1_server.py pi@192.168.1.53:/home/pi/f1/
 ```
 Replace `/path/to/f1_server.py` with wherever the file actually is. For example if it's in Downloads:
 ```bash
-scp ~/Downloads/f1_server.py pi@192.168.1.45:/home/pi/f1/
+scp ~/Downloads/f1_server.py pi@192.168.1.53:/home/pi/f1/
 ```
 
 On Windows with PuTTY, use `pscp` instead of `scp`, syntax is the same.
@@ -153,14 +153,14 @@ venv/bin/python f1_server.py
 
 You should see:
 ```
-INFO  * Running on http://0.0.0.0:5000
+INFO  * Running on http://0.0.0.0:8080
 INFO  Poll loop started
 INFO  Schedule: 24 rounds this season
 ```
 
 **Open a second terminal on your computer and test the endpoint:**
 ```bash
-curl http://192.168.1.45:5000/p1
+curl http://192.168.1.53:8080/p1
 ```
 
 Expected during off-season:
@@ -175,7 +175,7 @@ Expected during a race weekend:
 
 **Check the debug endpoint:**
 ```bash
-curl http://192.168.1.45:5000/status
+curl http://192.168.1.53:8080/status
 ```
 This shows full internal state — useful for diagnosing what the server thinks is happening.
 
@@ -191,7 +191,7 @@ This makes the server start automatically on every boot, and restart itself if i
 
 From your computer:
 ```bash
-scp /path/to/f1server.service pi@192.168.1.45:/home/pi/f1/
+scp /path/to/f1server.service pi@192.168.1.53:/home/pi/f1/
 ```
 
 **Back in SSH, install and enable it:**
@@ -223,7 +223,7 @@ sudo reboot
 
 Wait 30 seconds, SSH back in, then:
 ```bash
-curl http://192.168.1.45:5000/p1
+curl http://192.168.1.53:8080/p1
 ```
 
 If it responds, auto-start is working.
@@ -237,7 +237,7 @@ Open `F1_LED_Controller.ino` in Arduino IDE and update these three lines:
 ```cpp
 const char* ssid     = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
-const char* piHost   = "192.168.1.45";   // your Pi's static IP from Part 3
+const char* piHost   = "192.168.1.53";   // your Pi's static IP from Part 3
 ```
 
 Flash to the NodeMCU. On boot it will try the Pi first, fall back to Jolpica if the Pi is unreachable. The bottom-right of the TFT shows `Pi+ESPN` when the Pi is being used, `Jolpica` when falling back.
@@ -249,7 +249,7 @@ Flash to the NodeMCU. On boot it will try the Pi first, fall back to Jolpica if 
 Raspberry Pi OS Lite doesn't enable a firewall by default, so port 5000 is already open. If you've added `ufw` yourself:
 
 ```bash
-sudo ufw allow 5000
+sudo ufw allow 8080
 sudo ufw reload
 ```
 
@@ -270,7 +270,7 @@ sudo systemctl restart f1server
 **Update the server script:**
 ```bash
 # From your computer:
-scp f1_server.py pi@192.168.1.45:/home/pi/f1/
+scp f1_server.py pi@192.168.1.53:/home/pi/f1/
 # Then on Pi:
 sudo systemctl restart f1server
 ```
@@ -286,7 +286,7 @@ hostname -I
 
 - [ ] Pi boots and SSH works
 - [ ] Static IP set and survives reboot
-- [ ] `curl http://192.168.1.45:5000/p1` returns JSON
+- [ ] `curl http://192.168.1.53:8080/p1` returns JSON
 - [ ] Service starts automatically after `sudo reboot`
 - [ ] NodeMCU shows `Pi+ESPN` in TFT footer
 - [ ] During a race, status changes from `pre` → `live` → `finished`
