@@ -244,12 +244,12 @@ Flash to the NodeMCU. On boot it will try the Pi first, fall back to Jolpica if 
 
 ---
 
-## Part 8 — Open the Firewall (if needed)
+## Part 8 — Open the Firewall (if needed) [if using port 5000]
 
 Raspberry Pi OS Lite doesn't enable a firewall by default, so port 5000 is already open. If you've added `ufw` yourself:
 
 ```bash
-sudo ufw allow 8080
+sudo ufw allow 5000
 sudo ufw reload
 ```
 
