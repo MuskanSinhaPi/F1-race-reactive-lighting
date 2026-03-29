@@ -578,19 +578,24 @@ void handleIncoming() {
       }
 
     } else if (status == "scheduled") {
-      raceSunday = false; raceCancelled = false; raceFinished = false;
-      currentTeamID = lastRaceTeamID;
-      if (liveMode) {
-        updateTeamDisplay(lastRaceTeamID, true);
-        updateStatus("SCHEDULED", C_GREY); updateInfoLine();
+      raceSunday = true;          // ← was false; race IS today
+      raceCancelled = false;
+      raceFinished  = false;
+    
+      // Seed current team from Pi if provided (handles Mercedes→McLaren case)
+      if (teamID >= 1) {
+        currentTeamID = teamID;
+      } else {
+        currentTeamID = lastRaceTeamID;
       }
-
+    
     } else if (status == "idle") {
       raceSunday = false; raceCancelled = false; raceFinished = false;
-      currentTeamID = lastRaceTeamID;
+      currentTeamID = lastRaceTeamID;           // keep last known colour
       if (liveMode) {
         updateTeamDisplay(lastRaceTeamID, true);
-        updateStatus("NO RACE", C_GREY); updateInfoLine();
+        updateStatus("NO RACE", C_GREY);
+        updateInfoLine();
       }
     }
 
@@ -609,11 +614,33 @@ void loop() {
   checkButton();
   maintainWiFi();
   checkLightsOutCountdown();
-  if (getRacePhase() == 4) {
+
+  // ── Autonomous race-day detection ─────────────────────────────────────────
+  // Do NOT depend solely on Pi push to set raceSunday.
+  // Phase 1 = pre-race window (≤6h before), Phase 2 = race window (≤2h after).
+  // Phase 3 = post-race cooldown. Phase 4 = day over — reset flags.
+  int phase = getRacePhase();
+  if (phase == 1 || phase == 2) {
+    if (!raceSunday && !raceFinished) {
+      raceSunday = true;
+      log("Auto raceSunday = true (phase " + String(phase) + ")");
+    }
+  } else if (phase == 4) {
     if (raceFinished || raceSunday || lightsOutTriggered)
       raceFinished = raceSunday = raceCancelled = lightsOutTriggered = false;
     currentTeamID = lastRaceTeamID;
   }
+  // ── (Remove the old phase==4 block that was here before) ──────────────────
+
+  // ── Continuous pulse during live race ─────────────────────────────────────
+  if (raceSunday && !raceFinished && currentMode == MODE_LIVE) {
+    static unsigned long lastPulse = 0;
+    if (millis() - lastPulse > 2500) {
+      sendToNano(CMD_PULSE);
+      lastPulse = millis();
+    }
+  }
+
   if (millis() - lastNTPSync > ntpResync) {
     lastNTPSync = millis();
     configTime(19800, 0, "pool.ntp.org");
@@ -910,11 +937,12 @@ void applyMode(int mode) {
     updateTeamDisplay(currentTeamID, true); updateModeDisplay();
     sendToNano(currentTeamID); lastSentTeam = currentTeamID;
     if (getRacePhase() == 2 && !raceFinished) sendToNano(CMD_PULSE);
-    if (raceFinished && pendingWDC)  updateStatus("WDC PENDING", C_YELLOW);
-    else if (raceFinished)           updateStatus("FINISHED",    C_GREEN);
-    else if (raceSunday)             updateStatus("LIVE",        C_GREEN);
-    else if (raceCancelled)          updateStatus("CANCELLED",   C_RED);
-    else                             updateStatus("NO RACE",     C_GREY);
+    if      (raceFinished && pendingWDC)        updateStatus("WDC PENDING", C_YELLOW);
+    else if (raceFinished)                      updateStatus("FINISHED",    C_GREEN);
+    else if (raceSunday && getRacePhase() == 2) updateStatus("LIVE",        C_GREEN);
+    else if (raceSunday)                        updateStatus("RACE TODAY",  C_YELLOW);  
+    else if (raceCancelled)                     updateStatus("CANCELLED",   C_RED);
+    else                                        updateStatus("NO RACE",     C_GREY);
     updateInfoLine(); return;
   }
   int teamID = mode - 1;
