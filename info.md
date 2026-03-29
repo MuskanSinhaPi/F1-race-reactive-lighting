@@ -779,3 +779,21 @@ cppWiFi.config(IPAddress(192,168,1,55), IPAddress(192,168,1,1), IPAddress(255,25
 When you set a static IP with WiFi.config() on ESP8266, you must also set a DNS server as the fourth argument, otherwise DNS resolution fails and pool.ntp.org can never be resolved. The NTP library needs DNS to resolve the hostname.
 This is almost certainly the root cause of ALL the issues — NTP failing, Jolpica failing (HTTPS also needs DNS). The old sketch used DHCP which automatically gets DNS from the router.Edited a file, read a fileEdited a file, read a fileThat's the fix. Without a DNS server specified in WiFi.config(), the ESP8266 can't resolve any hostname — pool.ntp.org, api.jolpi.ca, everything fails silently. That's why NTP hangs forever and Jolpica returns HTTP 0.
 The old sketch used WiFi.begin(ssid, password) with no WiFi.config() call, so it got DNS automatically from DHCP. The new sketch set a static IP but forgot the DNS parameter, breaking all hostname resolution.
+
+Client Isolation / AP Isolation (VERY COMMON)
+
+Some routers (especially:
+
+- college WiFi
+- mesh routers
+- guest networks
+- newer ISP routers)
+
+👉 block devices from talking to each other
+
+So:
+
+- NodeMCU → internet ✅
+- Pi → internet ✅
+- Laptop → NodeMCU ❌
+- Laptop → Pi ❌
