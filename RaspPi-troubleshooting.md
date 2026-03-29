@@ -365,3 +365,135 @@ curl http://192.168.1.53:8080/refresh
 | 9 | `raceCancelled` persists across server restarts | Clear flag in `idle`, `scheduled`, `delayed`, `postponed` branches |
 | 10 | Red Bull colour invisible on dark panel | `0x0A32` → `0xF926` (red-orange, visible) |
 | 11 | Boot shows warm white before first push | Load EEPROM / Jolpica before calling `drawMainScreen()` |
+
+# 🛠️ Troubleshooting: Windows Cannot Reach Pi / NodeMCU
+
+## 🔥 1. Windows Firewall Blocking LAN Traffic (Very Common)
+
+Windows Defender Firewall can block:
+- SSH (port 22)
+- HTTP (port 8080)
+- ICMP (ping)
+
+### ✅ Quick Test
+
+1. Open:
+   Control Panel → Windows Defender Firewall
+
+2. Click:
+   Turn Windows Defender Firewall ON or OFF
+
+3. Turn OFF for Private Network
+
+4. Try again:
+   ssh pi@192.168.1.53
+
+👉 If it works → firewall is the issue
+
+---
+
+### ✅ Proper Fix (Recommended)
+
+Instead of keeping firewall off, allow:
+- Port 22 (SSH)
+- Port 8080 (NodeMCU)
+
+---
+
+## 🔥 2. Wrong Network Profile (Public vs Private)
+
+Windows behavior:
+- Public network → blocks local traffic
+- Private network → allows LAN communication
+
+### ✅ Fix
+
+Go to:
+Settings → Network & Internet → WiFi → Your Network
+
+Set:
+Network Profile = Private
+
+---
+
+## 🔥 3. mDNS (.local) Not Supported on Windows
+
+This explains:
+ping raspberrypi.local
+
+👉 This failing is normal on Windows
+
+- macOS supports Bonjour (mDNS)
+- Windows does not (by default)
+
+### ✅ Optional Fix
+
+Install:
+- Apple Bonjour (comes with iTunes)
+
+👉 Not required if you're using IP addresses
+
+---
+
+## 🔥 4. Antivirus / Security Software
+
+Apps like:
+- McAfee
+- Norton
+- Kaspersky
+
+👉 Can silently block LAN communication
+
+### ✅ Test
+
+- Temporarily disable antivirus
+- Retry SSH / HTTP
+
+---
+
+## 🔥 5. Different Subnet (Rare but Important)
+
+Run:
+ipconfig
+
+### ✅ Expected:
+192.168.1.xxx
+
+### ❌ Problem:
+192.168.0.xxx
+
+👉 Means you're on a different subnet → cannot reach Pi
+
+---
+
+# 🧪 Minimal Debug Checklist
+
+Follow in order:
+
+### 1️⃣ Check your IP
+ipconfig
+
+---
+
+### 2️⃣ Ping NodeMCU
+ping 192.168.1.55
+
+---
+
+### 3️⃣ Disable Firewall (Temporary)
+- Turn off Windows Defender Firewall
+- Test again
+
+---
+
+### 4️⃣ Test HTTP
+curl http://192.168.1.55:8080
+
+---
+
+# 🎯 Summary
+
+If your Mac works but Windows doesn’t:
+
+✅ Network is fine  
+❌ Windows is blocking LAN communication  
