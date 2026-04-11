@@ -623,7 +623,7 @@ void loop() {
   if (phase == 1 || phase == 2) {
     if (!raceSunday && !raceFinished) {
       raceSunday = true;
-      log("Auto raceSunday = true (phase " + String(phase) + ")");
+      Serial.println("Auto raceSunday = true (phase " + String(phase) + ")");
     }
   } else if (phase == 4) {
     if (raceFinished || raceSunday || lightsOutTriggered)
