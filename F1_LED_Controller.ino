@@ -74,7 +74,7 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 #define NANO_TX    D8
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
-const char* ssid     = "WiFi ssid";
+const char* ssid     = "wifi ssid";
 const char* password = "wifi password";
 
 unsigned long lastWifiCheck   = 0;
