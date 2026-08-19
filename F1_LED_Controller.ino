@@ -99,7 +99,7 @@ int lastKnownFinishedRound = -1;
 
 // PATCH: checkered-flag boot-replay eligibility (persisted in EEPROM so it
 // survives multiple reboots within the window, not just RAM-lived per-boot).
-const unsigned long ANIM_REPLAY_WINDOW_SEC = 21600; // 6 hours
+const unsigned long ANIM_REPLAY_WINDOW_SEC = 43200; // 12 hours
 bool bootFinishAnimEligible = false;
 
 // PATCH: handles a WDC-confirmed push arriving before raceFinished is true
@@ -161,7 +161,7 @@ time_t raceFinishedAtEpoch = 0; // PATCH: independent of raceStartEpoch — see 
 #define EEPROM_LAST_RACE_TIME 24
 #define EEPROM_SEASON_TIME    28
 #define EEPROM_INIT_FLAG      32
-#define EEPROM_FINISH_ANIM_ROUND 33  // PATCH: which round's checkered-flag replay has already played
+#define EEPROM_FINISH_ANIM_ROUND 33  // legacy slot; no longer used to gate animation replay
 #define EEPROM_TOTAL_ROUNDS      34  // PATCH: persist season length across power cycles
 #define EEPROM_MAGIC          0xA5
 #define EEPROM_LAST_RACE_ROUND 35
@@ -656,8 +656,6 @@ void fetchNextRaceFromJolpica() {
         difftime(raceStartEpoch, time(nullptr));
 
       lightsOutTriggered = false;
-      raceAnimationPlayedThisBoot = false;
-
       Serial.printf(
         "NEXT GP FOUND: %s | round %d/%d\n",
         raceName,
@@ -842,25 +840,48 @@ void checkRaceFinishViaJolpica() {
 // subsequent season — the same root bug as the boot-time one, just
 // recurring annually instead of on every reboot.
 void checkSeasonRollover(int newCompletedRound) {
+
   if (newCompletedRound < lastKnownFinishedRound) {
+
+    // New season → clear current-season WDC state
     wdcConfirmed = false;
     isFinalRound = false;
     pendingWDC = false;
 
+    // Clear pending Jolpica confirmation
     pendingJolpicaWDC = 0;
     pendingJolpicaWDCPolls = 0;
+
+    // Clear pending Pi confirmation
+    wdcConfirmationPending = false;
+    pendingConfirmedTeamID = 0;
+
+    // Clear old season-end screen state
+    seasonScreenActive = false;
+    seasonAnimationPlayedThisBoot = false;
+
+    // DO NOT clear EEPROM_WDC_CHAMP.
+    // It is still the defending champion.
 
     Serial.println("Season rollover detected — WDC state reset for new season");
   }
 }
 
 bool raceFinishAnimEligible(int round) {
-  time_t stored; EEPROM.get(EEPROM_LAST_RACE_TIME, stored);
+  (void)round;  // Kept for compatibility; eligibility is not round-gated.
+
+  time_t stored;
+  EEPROM.get(EEPROM_LAST_RACE_TIME, stored);
+
   time_t now = time(nullptr);
-  if (stored < 1700000000 || stored > now) return false;
-  if (difftime(now, stored) >= ANIM_REPLAY_WINDOW_SEC) return false;
-  int playedRound = EEPROM.read(EEPROM_FINISH_ANIM_ROUND);
-  return playedRound != round;
+
+  if (stored < 1700000000 || stored > now)
+    return false;
+
+  if (difftime(now, stored) >= ANIM_REPLAY_WINDOW_SEC)
+    return false;
+
+  return !raceAnimationPlayedThisBoot;
 }
 
 // PATCH: new function. Closes the last Pi-dependency gap: WDC *confirmation*
@@ -1032,7 +1053,7 @@ void setup() {
     EEPROM.put(EEPROM_LAST_RACE_TIME, zero);
     EEPROM.put(EEPROM_SEASON_TIME,    zero);
     EEPROM.write(EEPROM_INIT_FLAG,    EEPROM_MAGIC);
-    EEPROM.write(EEPROM_FINISH_ANIM_ROUND, 255); // PATCH: 255 = "no round played yet" sentinel
+    EEPROM.write(EEPROM_FINISH_ANIM_ROUND, 255); // legacy slot retained; no longer used for animation gating
     EEPROM.write(EEPROM_TOTAL_ROUNDS, 24);        // PATCH: sane default season length
     EEPROM.commit();
   }
@@ -1122,16 +1143,14 @@ void setup() {
     if (savedWDC >= 1 && savedWDC <= 11) wdcTeamID = savedWDC;
     if (!wdcConfirmed && lastCompletedRound >= totalRounds) { pendingWDC = true; isFinalRound = true; }
 
-    // PATCH: replay the checkered-flag animation on a reboot landing within
-    // 6h of the finish — once per race (EEPROM-tracked so repeated reboots
-    // in the window don't replay it), and only if we're in/entering LIVE
-    // mode. If we boot into a different mode, defer to checkButton()'s
-    // first manual toggle into LIVE (see there).
+    // PATCH: replay the checkered-flag animation on every reboot landing
+    // within 12h of the actual finish, but at most once per boot. If we boot
+    // into a different mode, defer to checkButton()'s first manual toggle
+    // into LIVE. Consumption is RAM-only; do not persist it in EEPROM.
     bootFinishAnimEligible = raceFinishAnimEligible(lastCompletedRound);
     if (bootFinishAnimEligible && currentMode == MODE_LIVE) {
       triggerRaceFinishAnimation(lastRaceTeamID);
-      EEPROM.write(EEPROM_FINISH_ANIM_ROUND, (uint8_t)lastCompletedRound);
-      EEPROM.commit();
+      raceAnimationPlayedThisBoot = true;
       bootFinishAnimEligible = false;
     } else {
       drawMainScreen();
@@ -1140,7 +1159,9 @@ void setup() {
                    pendingWDC ? C_YELLOW      : C_GREEN);
       updateInfoLine();
     }
-    sendToNano(lastRaceTeamID);
+    // applyMode() is the single authoritative LED/TFT state application.
+    // Do not pre-send lastRaceTeamID here, or DISPLAY/team modes can inherit
+    // a stale LIVE colour for a moment.
     applyMode(currentMode);
     return;
   }
@@ -1697,18 +1718,12 @@ void handleRaceFinished(int teamID) {
     currentTeamID = teamID; lastRaceTeamID = teamID;
     EEPROM.write(EEPROM_LAST_RACE, teamID);
   }
-  // Write race time only if not already set to a recent timestamp.
-  // This prevents a Pi reconnect (days later) from refreshing the timestamp
-  // and making raceFinishedRecently() return true for a week-old race.
+  // PATCH: store the actual finish-detection time exactly once for this
+  // race. Duplicate finish events do not refresh the timestamp because only
+  // firstTime reaches this block. Reboots/refreshes/mode toggles never write it.
   if (firstTime) {
-    time_t stored;
-    EEPROM.get(EEPROM_LAST_RACE_TIME, stored);
-    time_t now = time(nullptr);
-    bool alreadyRecent = (stored > 1700000000 && stored <= now &&
-                          difftime(now, stored) < 43200);
-    if (!alreadyRecent) {
-      EEPROM.put(EEPROM_LAST_RACE_TIME, now);
-    }
+    raceFinishedAtEpoch = time(nullptr);
+    EEPROM.put(EEPROM_LAST_RACE_TIME, raceFinishedAtEpoch);
   }
   char shortGP[21] = {}; strncpy(shortGP, lastGPName, 20);
   char* g = strstr(shortGP, " Grand Prix"); if (g) *g = '\0';
@@ -1833,15 +1848,18 @@ void checkButton() {
         currentMode = (currentMode + 1) % MODE_COUNT;
         EEPROM.write(EEPROM_SAVED_MODE, currentMode); EEPROM.commit();
         // PATCH: if we booted into a non-LIVE mode while a finish-animation
-        // replay was still eligible (race finished <6h ago, not yet shown
-        // for this round), play it now — the FIRST time we land on LIVE —
-        // instead of never. Consumed immediately so later toggles back to
-        // LIVE within the same window don't replay it again.
-        if (currentMode == MODE_LIVE && bootFinishAnimEligible) {
-          bootFinishAnimEligible = false;
-          EEPROM.write(EEPROM_FINISH_ANIM_ROUND, (uint8_t)lastKnownFinishedRound);
-          EEPROM.commit();
-          triggerRaceFinishAnimation(lastRaceTeamID);
+        // replay is still eligible, play it on the FIRST transition into LIVE.
+        // The animation is consumed only for this boot via RAM.
+        if (currentMode == MODE_LIVE) {
+          int lastCompletedRound = EEPROM.read(EEPROM_LAST_RACE_ROUND);
+
+          if (raceFinishAnimEligible(lastCompletedRound)) {
+            triggerRaceFinishAnimation(lastRaceTeamID);
+            raceAnimationPlayedThisBoot = true;
+            bootFinishAnimEligible = false;
+          } else {
+            applyMode(MODE_LIVE);
+          }
         } else {
           applyMode(currentMode);
         }
@@ -1853,31 +1871,57 @@ void checkButton() {
 
 void applyMode(int mode) {
   if (seasonScreenActive) return;
+
   if (mode == MODE_DISPLAY) {
+    // Always explicitly establish DISPLAY state on the Nano.
     sendToNano(CMD_DISPLAY);
-    int d = wdcConfirmed && wdcTeamID >= 1 ? wdcTeamID : (int)EEPROM.read(EEPROM_WDC_CHAMP);
+
+    int d = wdcConfirmed && wdcTeamID >= 1
+              ? wdcTeamID
+              : (int)EEPROM.read(EEPROM_WDC_CHAMP);
     if (d < 1 || d > 11) d = lastRaceTeamID;
+
     updateTeamDisplay(d, false);
     updateStatus(wdcConfirmed ? "CHAMPIONS!" : "DEFENDING", C_YELLOW);
-    updateModeDisplay(); return;
+    updateModeDisplay();
+    return;
   }
+
   if (mode == MODE_LIVE) {
     lastSentTeam = -1;
-    if (currentTeamID < 1 || currentTeamID > 11) currentTeamID = lastRaceTeamID;
-    updateTeamDisplay(currentTeamID, true); updateModeDisplay();
-    sendToNano(currentTeamID); lastSentTeam = currentTeamID;
-    if (getRacePhase() == 2 && !raceFinished) sendToNano(CMD_PULSE);
+
+    if (currentTeamID < 1 || currentTeamID > 11)
+      currentTeamID = lastRaceTeamID;
+
+    // Always explicitly establish LIVE team state on the Nano.
+    sendToNano(currentTeamID);
+    lastSentTeam = currentTeamID;
+
+    updateTeamDisplay(currentTeamID, true);
+    updateModeDisplay();
+
+    // Pulse only while the race is actually live; never after finish.
+    if (getRacePhase() == 2 && !raceFinished)
+      sendToNano(CMD_PULSE);
+
     if      (raceFinished && pendingWDC)        updateStatus("WDC PENDING", C_YELLOW);
     else if (raceFinished)                      updateStatus("FINISHED",    C_GREEN);
     else if (raceSunday && getRacePhase() == 2) updateStatus("LIVE",        C_GREEN);
-    else if (raceSunday)                        updateStatus("RACE TODAY",  C_YELLOW);  
+    else if (raceSunday)                        updateStatus("RACE TODAY",  C_YELLOW);
     else if (raceCancelled)                     updateStatus("CANCELLED",   C_RED);
     else                                        updateStatus("NO RACE",     C_GREY);
-    updateInfoLine(); return;
+
+    updateInfoLine();
+    return;
   }
+
   int teamID = mode - 1;
-  sendToNano(teamID); updateTeamDisplay(teamID, false);
-  updateStatus(teamNames[teamID], teamTFTColor[teamID]); updateModeDisplay();
+
+  // Team modes always establish their own LED colour explicitly.
+  sendToNano(teamID);
+  updateTeamDisplay(teamID, false);
+  updateStatus(teamNames[teamID], teamTFTColor[teamID]);
+  updateModeDisplay();
 }
 
 const char* getModeName(int mode) {
