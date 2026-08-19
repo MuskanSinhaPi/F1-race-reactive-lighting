@@ -129,6 +129,9 @@ void handleCommand(int cmd) {
   if (cmd == CMD_DISPLAY) {
     pulsing = false;
     numAccentPixels = 0;   // clear accents — display mode is plain warm white
+    // IMPORTANT: DISPLAY is not a team colour.
+    // Force the next team command to actually update the LEDs.
+    currentTeam = -1;
     smoothFade(200, 200, 190);
     strip.setBrightness(150);
     strip.show();
