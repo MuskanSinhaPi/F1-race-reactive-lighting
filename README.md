@@ -379,16 +379,14 @@ Check boot-strap pin states at power-on. GPIO0 must be HIGH, GPIO15 must be LOW.
 - The system auto-detects new seasons: EEPROM champion and race data are cleared when a new season year is detected from the API
 - Back up your firmware after any working configuration
 
-'''
 I see no protocol ambiguity between these two programs. The few things I'd call "ambiguities" are external-data issues rather than mismatches between your Pi and NodeMCU:
 
-ESPN vs Jolpica could theoretically disagree on a post-race classification.
-Jolpica API semantics/schema could change.
-Future F1 constructor changes require updating the team mapping.
-WDC projection is deliberately Pi-owned; NodeMCU only independently confirms the final standings.
-The Pi seeds WDC standings both initially and again six hours before the final, which is redundant but harmless.
+- ESPN vs Jolpica could theoretically disagree on a post-race classification.
+- Jolpica API semantics/schema could change.
+- Future F1 constructor changes require updating the team mapping.
+- WDC projection is deliberately Pi-owned; NodeMCU only independently confirms the final standings.
+- The Pi seeds WDC standings both initially and again six hours before the final, which is redundant but harmless.
 
 I don't see a remaining logic conflict where the Pi would send something that the NodeMCU interprets incorrectly.
 
 So if your question is “Can I now leave the Pi server and NodeMCU code alone and run the system?” — yes, I would. The architecture is coherent, the normal path and fallback path converge correctly, and the important race/season edge cases have been accounted for.
-'''
