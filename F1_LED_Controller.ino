@@ -1103,6 +1103,7 @@ void setup() {
   // 1.5s delay — first HTTPS call after boot needs extra heap settling time
   delay(1500);
   fetchLastRaceFromJolpica(false);
+  currentTeamID = lastRaceTeamID;
   fetchSeasonTotal();
   // PATCH: capture before fetchNextRaceFromJolpica() can clobber it (same
   // bug as PATH B — see comment there).
