@@ -74,7 +74,7 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 #define NANO_TX    D8
 SoftwareSerial nanoSerial(NANO_RX, NANO_TX);
 
-const char* ssid     = "your wifi ssid";
+const char* ssid     = "Your WiFi SSID";
 const char* password = "your wifi password";
 
 unsigned long lastWifiCheck   = 0;
@@ -111,6 +111,8 @@ bool bootFinishAnimEligible = false;
 // either way, instead of silently dropping an early confirmation.
 bool wdcConfirmationPending = false;
 int pendingConfirmedTeamID = 0;
+int pendingJolpicaWDC = 0;
+int pendingJolpicaWDCPolls = 0;
 
 // PATCH: one-shot (with retry) refetch of the next race once the previous
 // one is fully wrapped up (phase 4), so raceStartEpoch/raceName/currentRound
@@ -516,231 +518,134 @@ void fetchSeasonTotal() {
 void fetchNextRaceFromJolpica() {
   drawStatusLine("Fetching next GP...", C_YELLOW);
 
-  time_t now = time(nullptr);
+  // Start immediately after the last completed race.
+    int startRound = EEPROM.read(EEPROM_LAST_RACE_ROUND) + 1;
+    
+    if (startRound < 1 || startRound > totalRounds)
+      startRound = 1;
+      
+    time_t now = time(nullptr);
+    for (int round = startRound; round <= totalRounds; round++) {
 
-  if (now < 100000) {
-    Serial.println("Jolpica next: NTP time unavailable");
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(10000);
+
+    HTTPClient https;
+
+    String url =
+      "https://api.jolpi.ca/ergast/f1/current/" +
+      String(round) + ".json";
+
+    Serial.printf("Jolpica next: trying round %d\n", round);
+
+    if (!https.begin(client, url)) {
+      Serial.println("Jolpica next: begin() FAILED");
+      continue;
+    }
+
+    https.setTimeout(10000);
+    https.setUserAgent("F1LiveController/1.0");
+    https.addHeader("Accept-Encoding", "identity");
+
+    int code = https.GET();
+
+    Serial.printf(
+      "Jolpica round %d HTTP: %d\n",
+      round, code
+    );
+
+    if (code != HTTP_CODE_OK) {
+      https.end();
+      continue;
+    }
+
+    String payload = https.getString();
+    https.end();
+
+    JsonDocument doc;
+
+    DeserializationError err =
+      deserializeJson(doc, payload);
+
+    if (err) {
+      Serial.printf(
+        "Jolpica round %d JSON ERROR: %s\n",
+        round, err.c_str()
+      );
+      continue;
+    }
+
+    JsonVariant race =
+      doc["MRData"]["RaceTable"]["Races"][0];
+
+    const char* name = race["raceName"];
+    const char* date = race["date"];
+    const char* rtime = race["time"];
+    const char* rndS = race["round"];
+
+    if (!name || !date || !rtime || !rndS) {
+      Serial.printf(
+        "Jolpica round %d: incomplete race data\n",
+        round
+      );
+      continue;
+    }
+
+    time_t raceEpoch =
+      parseUTCEpoch(date, rtime);
+
+    Serial.printf(
+      "Round %s: %s %s %s\n",
+      rndS, name, date, rtime
+    );
+
+    // THIS is the important check:
+    // only accept a genuinely future race.
+    if (raceEpoch <= now) {
+      Serial.printf(
+        "Round %d already passed — trying next\n",
+        round
+      );
+      continue;
+    }
+
+    // -------------------------------
+    // Future race found
+    // -------------------------------
+
+    strncpy(
+      raceName,
+      name,
+      sizeof(raceName) - 1
+    );
+    raceName[sizeof(raceName) - 1] = '\0';
+
+    char* g = strstr(raceName, " Grand Prix");
+    if (g) *g = '\0';
+
+    raceStartEpoch = raceEpoch;
+    currentRound = atoi(rndS);
+
+    lastDiff =
+      difftime(raceStartEpoch, time(nullptr));
+
+    lightsOutTriggered = false;
+    raceAnimationPlayedThisBoot = false;
+
+    Serial.printf(
+      "NEXT GP FOUND: %s | round %d/%d\n",
+      raceName,
+      currentRound,
+      totalRounds
+    );
+
     return;
   }
 
-  // currentRound = last completed round.
-  // Start looking at the next round.
-  int startRound = currentRound + 1;
-
-  if (startRound < 1)
-    startRound = 1;
-
-  // Look ahead several rounds in case:
-  // - the next race has already happened according to the API
-  // - there is a calendar anomaly
-  // - the season boundary has been crossed.
-  const int MAX_LOOKAHEAD = 5;
-
-  for (int round = startRound;
-       round < startRound + MAX_LOOKAHEAD;
-       round++) {
-
-    char url[160];
-
-    snprintf(
-      url,
-      sizeof(url),
-      "https://api.jolpi.ca/ergast/f1/current/%d.json",
-      round
-    );
-
-    Serial.printf(
-      "Jolpica next: checking round %d\n",
-      round
-    );
-
-    for (int attempt = 1; attempt <= 2; attempt++) {
-
-      WiFiClientSecure client;
-      client.setInsecure();
-      client.setTimeout(15000);
-
-      HTTPClient https;
-
-      if (!https.begin(client, url)) {
-        Serial.printf(
-          "Jolpica round %d: begin FAILED (%d/2)\n",
-          round,
-          attempt
-        );
-        delay(500);
-        continue;
-      }
-
-      https.setTimeout(15000);
-      https.setUserAgent("F1LiveController/1.0");
-      https.addHeader("Accept-Encoding", "identity");
-
-      int code = https.GET();
-
-      Serial.printf(
-        "Jolpica round %d HTTP: %d (%d/2)\n",
-        round,
-        code,
-        attempt
-      );
-
-      if (code != HTTP_CODE_OK) {
-        if (code <= 0) {
-          Serial.printf(
-            "Jolpica round %d error: %s\n",
-            round,
-            https.errorToString(code).c_str()
-          );
-        }
-
-        https.end();
-        delay(500);
-        continue;
-      }
-
-      // Small response: read it completely before parsing.
-      String payload = https.getString();
-
-      Serial.printf(
-        "Jolpica round %d payload: %d bytes\n",
-        round,
-        payload.length()
-      );
-
-      https.end();
-
-      if (payload.length() < 50) {
-        Serial.printf(
-          "Jolpica round %d: suspiciously short response\n",
-          round
-        );
-        delay(500);
-        continue;
-      }
-
-      JsonDocument doc;
-
-      DeserializationError err =
-        deserializeJson(doc, payload);
-
-      if (err) {
-        Serial.printf(
-          "Jolpica round %d JSON ERROR: %s\n",
-          round,
-          err.c_str()
-        );
-
-        delay(500);
-        continue;
-      }
-
-      Serial.printf(
-        "Jolpica round %d JSON parsed OK\n",
-        round
-      );
-
-      JsonArray races =
-        doc["MRData"]["RaceTable"]["Races"].as<JsonArray>();
-
-      if (races.isNull() || races.size() == 0) {
-        Serial.printf(
-          "Jolpica round %d: no race returned\n",
-          round
-        );
-        break;
-      }
-
-      JsonObject race = races[0];
-
-      const char* name  = race["raceName"];
-      const char* date  = race["date"];
-      const char* rtime = race["time"];
-      const char* rndS  = race["round"];
-
-      if (!name || !date || !rtime || !rndS) {
-        Serial.printf(
-          "Jolpica round %d: missing race fields\n",
-          round
-        );
-        break;
-      }
-
-      time_t candidateEpoch =
-        parseUTCEpoch(date, rtime);
-
-      int candidateRound = atoi(rndS);
-
-      Serial.printf(
-        "Candidate: %s | %s %s | round %d | epoch %ld\n",
-        name,
-        date,
-        rtime,
-        candidateRound,
-        (long)candidateEpoch
-      );
-
-      // IMPORTANT:
-      // Only accept a race whose actual date + time is still
-      // in the future.
-      if (candidateEpoch > now) {
-
-        strncpy(
-          raceName,
-          name,
-          sizeof(raceName) - 1
-        );
-
-        raceName[sizeof(raceName) - 1] = '\0';
-
-        char* g = strstr(
-          raceName,
-          " Grand Prix"
-        );
-
-        if (g)
-          *g = '\0';
-
-        raceStartEpoch = candidateEpoch;
-
-        // candidateRound is the UPCOMING race.
-        // currentRound represents the LAST COMPLETED race.
-        currentRound = candidateRound - 1;
-
-        lastDiff =
-          difftime(
-            raceStartEpoch,
-            time(nullptr)
-          );
-
-        lightsOutTriggered = false;
-        raceAnimationPlayedThisBoot = false;
-
-        Serial.printf(
-          "NEXT GP FOUND: %s | round %d/%d | start %ld\n",
-          raceName,
-          candidateRound,
-          totalRounds,
-          (long)raceStartEpoch
-        );
-
-        return;
-      }
-
-      // This round has already started/passed.
-      // Continue to the next round.
-      Serial.printf(
-        "Round %d is not future — checking next round\n",
-        candidateRound
-      );
-
-      break;
-    }
-  }
-
+  // No future race found.
   Serial.println(
-    "Jolpica next: no future race found — "
-    "keeping previous schedule"
+    "Jolpica next: no future race found"
   );
 }
 //void fetchNextRaceFromJolpica() {
@@ -895,6 +800,10 @@ void checkSeasonRollover(int newCompletedRound) {
     wdcConfirmed = false;
     isFinalRound = false;
     pendingWDC = false;
+
+    pendingJolpicaWDC = 0;
+    pendingJolpicaWDCPolls = 0;
+
     Serial.println("Season rollover detected — WDC state reset for new season");
   }
 }
@@ -939,29 +848,98 @@ void checkWDCViaJolpica() {
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient https;
-  https.begin(client, "https://api.jolpi.ca/ergast/f1/current/driverStandings.json");
+
+  https.begin(
+    client,
+    "https://api.jolpi.ca/ergast/f1/current/driverStandings.json"
+  );
+
   https.setTimeout(15000);
   https.setUserAgent("F1LiveController/1.0");
-  https.addHeader("Accept-Encoding", "identity"); // PATCH: courteous identification per Jolpica community norms
+  https.addHeader("Accept-Encoding", "identity");
+
   int code = https.GET();
-  if (code != 200) { https.end(); Serial.printf("WDC check: HTTP %d\n", code); return; }
+
+  if (code != 200) {
+    https.end();
+    Serial.printf("WDC check: HTTP %d\n", code);
+    return;
+  }
 
   JsonDocument filter;
-  filter["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"][0]["Constructors"][0]["name"] = true;
+
+  filter["MRData"]["StandingsTable"]["StandingsLists"][0]
+        ["DriverStandings"][0]["Constructors"][0]["name"] = true;
 
   JsonDocument doc;
+
   DeserializationError err = deserializeJson(
-    doc, https.getStream(), DeserializationOption::Filter(filter));
+    doc,
+    https.getStream(),
+    DeserializationOption::Filter(filter)
+  );
+
   https.end();
-  if (err) { Serial.println("WDC check: parse err"); return; }
 
-  const char* con = doc["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"][0]["Constructors"][0]["name"];
-  if (!con) return;
+  if (err) {
+    Serial.printf("WDC check: parse err: %s\n", err.c_str());
+    return;
+  }
+
+  const char* con =
+    doc["MRData"]["StandingsTable"]["StandingsLists"][0]
+       ["DriverStandings"][0]["Constructors"][0]["name"];
+
+  if (!con) {
+    Serial.println("WDC check: constructor missing");
+    return;
+  }
+
   int cid = getTeamID(String(con));
-  if (cid < 1 || cid > 11) return;
 
-  Serial.println("Auto-check: WDC confirmed via Jolpica standings (no Pi push seen)");
-  finalizeWDCConfirmation(cid);
+  if (cid < 1 || cid > 11) {
+    Serial.println("WDC check: unknown constructor");
+    return;
+  }
+
+  Serial.printf(
+    "WDC check: standings candidate = %s\n",
+    teamNames[cid]
+  );
+
+  // First observation of a candidate.
+  if (pendingJolpicaWDC != cid) {
+    pendingJolpicaWDC = cid;
+    pendingJolpicaWDCPolls = 1;
+
+    Serial.printf(
+      "WDC check: candidate recorded (%s), waiting for confirmation poll\n",
+      teamNames[cid]
+    );
+
+    return;
+  }
+
+  // Same candidate seen again on a later poll.
+  pendingJolpicaWDCPolls++;
+
+  Serial.printf(
+    "WDC check: %s seen %d consecutive polls\n",
+    teamNames[cid],
+    pendingJolpicaWDCPolls
+  );
+
+  if (pendingJolpicaWDCPolls >= 2) {
+    Serial.printf(
+      "Auto-check: WDC confirmed via Jolpica standings: %s\n",
+      teamNames[cid]
+    );
+
+    finalizeWDCConfirmation(cid);
+
+    pendingJolpicaWDC = 0;
+    pendingJolpicaWDCPolls = 0;
+  }
 }
 
 void setup() {
