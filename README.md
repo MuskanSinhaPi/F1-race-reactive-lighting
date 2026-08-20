@@ -285,7 +285,7 @@ sudo cp f1server.service /etc/systemd/system/
 sudo systemctl enable --now f1server
 ```
 
-See `SETUP.txt` for full instructions including static IP assignment.
+See `Pi-setup.md` for full instructions including static IP assignment.
 
 ---
 
