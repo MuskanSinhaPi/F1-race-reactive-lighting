@@ -91,7 +91,7 @@ sudo nano /etc/dhcpcd.conf
 Scroll to the bottom and add these lines. Use your actual router IP and desired static IP:
 ```
 interface wlan0
-static ip_address=192.168.1.45/24
+static ip_address=192.168.1.53/24
 static routers=192.168.1.1
 static domain_name_servers=192.168.1.1
 ```
