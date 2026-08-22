@@ -215,6 +215,10 @@ int    lastRaceTeamID = TEAM_MCLAREN;   // FIX 1: never 0
 int    currentTeamID  = TEAM_MCLAREN;   // FIX 1: never 0
 time_t raceStartEpoch = 0;
 char raceName[64]  = "TBC";
+char nextGPMarquee[128] = "NEXT GP: TBC";
+int marqueeX = 160;
+unsigned long lastMarqueeUpdate = 0;
+const unsigned long marqueeInterval = 100;  // scroll speed
 char lastGPName[64] = "";
 char p1Status[16]  = "LOADING";
 double lastDiff    = 999999;
@@ -251,6 +255,8 @@ void drawSeasonEndScreen(int champID);
 void updateClock();
 void handleRaceFinished(int teamID);
 void handleIncoming();
+void buildNextGPMarquee();
+void updateNextGPMarquee() ;
 const char* getModeName(int mode);
 time_t parseUTCEpoch(const char* dateStr, const char* timeStr);
 int getTeamID(String team);
@@ -515,6 +521,69 @@ void fetchSeasonTotal() {
     Serial.printf("Season total: %d rounds\n", totalRounds);
   }
 }
+void buildNextGPMarquee() {
+  if (raceStartEpoch == 0) {
+    strcpy(nextGPMarquee, "NEXT GP: TBC");
+    return;
+  }
+
+  time_t istEpoch = raceStartEpoch + IST_OFFSET_SEC;
+  struct tm* t = gmtime(&istEpoch);
+
+  const char* dayNames[] = {
+    "SUN", "MON", "TUE", "WED",
+    "THU", "FRI", "SAT"
+  };
+
+  const char* monthNames[] = {
+    "JAN", "FEB", "MAR", "APR",
+    "MAY", "JUN", "JUL", "AUG",
+    "SEP", "OCT", "NOV", "DEC"
+  };
+
+  snprintf(
+    nextGPMarquee,
+    sizeof(nextGPMarquee),
+    "NEXT GP: %s | %s %02d %s | %02d:%02d IST",
+    raceName[0] != '\0' ? raceName : "TBC",
+    dayNames[t->tm_wday],
+    t->tm_mday,
+    monthNames[t->tm_mon],
+    t->tm_hour,
+    t->tm_min
+  );
+}
+void updateNextGPMarquee() {
+  if (seasonScreenActive) return;
+
+  if (millis() - lastMarqueeUpdate < marqueeInterval)
+    return;
+
+  lastMarqueeUpdate = millis();
+
+  // Clear marquee area
+  tft.fillRect(0, 16, 160, 12, C_PANEL);
+
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(1);
+  tft.setTextWrap(false);
+  
+  tft.setCursor(marqueeX, 20);
+  tft.print(nextGPMarquee);
+  
+  tft.setTextWrap(true);
+
+  marqueeX--;
+
+  // 6 pixels per character at text size 1
+  int textWidth = strlen(nextGPMarquee) * 6;
+
+  // Once the entire message has disappeared,
+  // restart from the right with a small gap.
+  if (marqueeX < -textWidth) {
+    marqueeX = 160;
+  }
+}
 void fetchNextRaceFromJolpica() {
   drawStatusLine("Fetching next GP...", C_YELLOW);
 
@@ -651,7 +720,7 @@ void fetchNextRaceFromJolpica() {
 
       raceStartEpoch = raceEpoch;
       currentRound = atoi(rndS);
-
+      buildNextGPMarquee();
       lastDiff =
         difftime(raceStartEpoch, time(nullptr));
 
@@ -1338,7 +1407,17 @@ void handleIncoming() {
       }
 
     } else if (status == "scheduled") {
-      raceSunday = true;          // ← was false; race IS today
+      // PATCH: "scheduled" just means ESPN has a scoreboard entry for the
+      // upcoming race — it fires as soon as that entry appears (a day or
+      // more out), not when the race is actually imminent. Only flip
+      // raceSunday true once we're actually within the pre-race/live window
+      // (same phase gate used everywhere else in the sketch). Don't force
+      // it false either — if we're already past that gate for some reason,
+      // a stale "scheduled" push shouldn't retract it.
+      int phase = getRacePhase();
+      if (phase == 1 || phase == 2) {
+        raceSunday = true;
+      }
       raceCancelled = false;
       raceFinished  = false;
 
@@ -1435,13 +1514,13 @@ void loop() {
   bool inWDCWindow      = isFinalRound && raceFinished && !wdcConfirmed;
   if ((inFallbackWindow || inWDCWindow) &&
       millis() - lastJolpicaPoll > jolpicaPollInterval) {
-    lastJolpicaPoll = millis()- jolpicaPollInterval;
+    lastJolpicaPoll = millis();
     if (inFallbackWindow) checkRaceFinishViaJolpica();
     else if (inWDCWindow) checkWDCViaJolpica();
   }
 
   // ── Continuous pulse during live race ─────────────────────────────────────
-  if (raceSunday && !raceFinished && currentMode == MODE_LIVE) {
+  if (getRacePhase() == 2 && !raceFinished && currentMode == MODE_LIVE) {
     static unsigned long lastPulse = 0;
     if (millis() - lastPulse > 2500) {
       sendToNano(CMD_PULSE);
@@ -1458,6 +1537,8 @@ void loop() {
     updateClock();
     updateCountdown(); // PATCH: live d/h/m/s countdown to next race
   }
+  
+  updateNextGPMarquee();
   handleIncoming();
   delay(50);
 }
@@ -1577,9 +1658,12 @@ void drawMainScreen() {
   tft.setCursor(4, 4); tft.print("F1 LIVE");
   tft.setCursor(100, 4); tft.print("--:--:--");
   tft.fillRect(0, 16, 160, 12, C_PANEL);
-  tft.setTextColor(C_GREY); tft.setTextSize(1); tft.setCursor(4, 20);
-  tft.print("Next GP: "); tft.setTextColor(C_WHITE);
-  tft.print(raceName[0] != '\0' ? raceName : "TBC");
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(1);
+  tft.setTextWrap(false);
+  tft.setCursor(160, 20);
+  tft.print(nextGPMarquee);
+  tft.setTextWrap(true);
   tft.drawFastHLine(0, 28, 160, C_BORDER);
   tft.fillRect(0, 29, 4, 44, teamTFTColor[currentTeamID]);
   tft.fillRect(4, 29, 156, 44, C_PANEL);
