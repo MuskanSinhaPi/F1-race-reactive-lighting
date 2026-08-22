@@ -797,3 +797,93 @@ So:
 - Pi → internet ✅
 - Laptop → NodeMCU ❌
 - Laptop → Pi ❌
+
+<hr>
+
+<h2> Pi not discoverable - so ran on laptop instead </h6>
+
+```
+Yep — this gives us the **exact restart procedure**. You don't need to recreate the venv or reinstall anything.
+
+You already have everything set up.
+
+### Next time you want to start the F1 server
+
+From the project directory:
+
+```bash
+cd ~/Desktop/F1-race-reactive-lighting
+```
+
+Then:
+
+```bash
+source venv/bin/activate
+```
+
+Then start it with the **venv Python explicitly**:
+
+```bash
+./venv/bin/python f1_server.py
+```
+
+That's it. 🏎️
+
+### Why we're using `./venv/bin/python`
+
+Your shell has this weird alias:
+
+```text
+python → /Library/Frameworks/Python.framework/Versions/3.12/bin/python3
+```
+
+So **don't use**:
+
+```bash
+python f1_server.py
+```
+
+Even though `(venv)` appears in your prompt, your alias overrides the venv.
+
+You also don't need to use the long:
+
+```bash
+/opt/homebrew/opt/python@3.14/bin/python3 ...
+```
+
+anymore. That's only what we used to create the venv.
+
+Your venv is already Python **3.14.7**, with Flask and Requests installed.
+
+### So your race-day cheat sheet is literally:
+
+```bash
+cd ~/Desktop/F1-race-reactive-lighting
+source venv/bin/activate
+./venv/bin/python f1_server.py
+```
+
+Wait for:
+
+```text
+Running on all addresses (0.0.0.0)
+```
+
+and then:
+
+```text
+[PUSH] OK 200
+```
+
+when the NodeMCU is powered on.
+
+### To stop it
+
+```text
+Ctrl + C
+```
+
+That's all.
+
+And importantly, **nothing in this process requires your Mac to be `192.168.1.53`**. The `192.168.1.53` in that startup banner is just the old Pi description in the server's logging text; the actual outgoing destination is `192.168.1.55`, which we've already verified works.
+```
