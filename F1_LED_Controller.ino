@@ -199,6 +199,7 @@ bool lightsOutTriggered = false;
 bool lastButtonState    = HIGH;
 bool nanoReady          = false;
 bool piAvailable        = false;
+bool raceIsLive         = false;
 bool wdcConfirmed       = false;
 int  wdcTeamID          = 0;
 bool seasonScreenActive = false;
@@ -1344,7 +1345,7 @@ void handleIncoming() {
     bool liveMode  = (currentMode == MODE_LIVE);
 
     if (status == "live") {
-      raceCancelled = false; raceSunday = true;
+      raceCancelled = false; raceSunday = true; raceIsLive = true;
       int col = (isFinalRound && wdcTeamIDp >= 1 && wdcStatS == "projected") ? wdcTeamIDp
               : (teamID >= 1) ? teamID : lastRaceTeamID;
       currentTeamID = col;
@@ -1356,7 +1357,7 @@ void handleIncoming() {
       } else { lastSentTeam = col; }
 
     } else if (status == "finished") {
-      raceCancelled = false; raceSunday = true;
+      raceCancelled = false; raceSunday = true; raceIsLive = false;
       if (teamID >= 1) { currentTeamID = teamID; lastRaceTeamID = teamID; }
       if (liveMode && teamID >= 1) updateTeamDisplay(teamID, true);
       handleRaceFinished(teamID);
@@ -1371,14 +1372,19 @@ void handleIncoming() {
       }
 
     } else if (status == "delayed") {
-      raceCancelled = false; currentTeamID = lastRaceTeamID;
-      if (liveMode) {
-        updateTeamDisplay(lastRaceTeamID, true);
-        updateStatus("RAIN DELAY", C_YELLOW); updateInfoLine(); sendToNano(CMD_PULSE);
-      }
-
+        raceCancelled = false;
+        currentTeamID = lastRaceTeamID;
+    
+        if (liveMode) {
+            updateTeamDisplay(lastRaceTeamID, true);
+            updateStatus("RAIN DELAY", C_YELLOW);
+            updateInfoLine();
+    
+            if ((raceIsLive || getRacePhase() == 2) && !raceFinished)
+                sendToNano(CMD_PULSE);
+        }
     } else if (status == "cancelled") {
-      raceCancelled = true; raceSunday = false; raceFinished = false;
+      raceCancelled = true; raceSunday = false; raceFinished = false; raceIsLive = false;
       lightsOutTriggered = false; raceAnimationPlayedThisBoot = false;
       seasonAnimationPlayedThisBoot = false; isFinalRound = false; pendingWDC = false;
       currentTeamID = lastRaceTeamID;
@@ -1394,7 +1400,7 @@ void handleIncoming() {
       }
 
     } else if (status == "postponed") {
-      raceCancelled = false; currentTeamID = lastRaceTeamID;
+      raceCancelled = false; currentTeamID = lastRaceTeamID; raceIsLive = false;
       if (liveMode) {
         updateTeamDisplay(lastRaceTeamID, true);
         updateStatus("POSTPONED", C_RED); updateInfoLine();
@@ -1420,6 +1426,7 @@ void handleIncoming() {
       }
       raceCancelled = false;
       raceFinished  = false;
+      raceIsLive    = false;
 
       // Seed current team from Pi if provided (handles Mercedes→McLaren case)
       if (teamID >= 1) {
@@ -1429,7 +1436,7 @@ void handleIncoming() {
       }
 
     } else if (status == "idle") {
-      raceSunday = false; raceCancelled = false; raceFinished = false;
+      raceSunday = false; raceCancelled = false; raceFinished = false; raceIsLive = false;
       currentTeamID = lastRaceTeamID;           // keep last known colour
       if (liveMode) {
         updateTeamDisplay(lastRaceTeamID, true);
@@ -1485,7 +1492,7 @@ void loop() {
   if (raceFinished && raceFinishedAtEpoch > 0 &&
       difftime(time(nullptr), raceFinishedAtEpoch) > 43200 &&
       !(isFinalRound && !wdcConfirmed)) {
-    raceFinished = raceSunday = raceCancelled = lightsOutTriggered = false;
+    raceFinished = raceSunday = raceCancelled = lightsOutTriggered = raceIsLive = false;
     currentTeamID = lastRaceTeamID;
   }
 
@@ -1763,9 +1770,7 @@ void updateTeamDisplay(int teamID, bool isLive) {
   if (currentMode == MODE_DISPLAY) {
     tft.print(wdcConfirmed ? "WDC CHAMPION" : "DEFENDING WDC");
   } else if (isLive) {
-    char label[27], gpShort[14]; strncpy(gpShort, lastGPName, 13); gpShort[13] = '\0';
-    snprintf(label, sizeof(label), gpShort[0] != '\0' ? "Last GP: %s | P1:" : "P1:", gpShort);
-    tft.print(label);
+  tft.print("Leading the Race Now:");
   } else { tft.print("CONSTRUCTOR"); }
   tft.fillRect(8, 43, 148, 20, C_PANEL);
   tft.setTextColor(teamTFTColor[teamID]); tft.setTextSize(2);
@@ -1986,7 +1991,7 @@ void applyMode(int mode) {
     updateModeDisplay();
 
     // Pulse only while the race is actually live; never after finish.
-    if (getRacePhase() == 2 && !raceFinished)
+    if ((raceIsLive || getRacePhase() == 2) && !raceFinished)
       sendToNano(CMD_PULSE);
 
     if      (raceFinished && pendingWDC)        updateStatus("WDC PENDING", C_YELLOW);
@@ -2056,16 +2061,21 @@ bool seasonFinishedRecently() {
 }
 
 int getTeamID(String team) {
-  if (team.indexOf("Ferrari")      >= 0) return TEAM_FERRARI;
-  if (team.indexOf("Alpine")       >= 0) return TEAM_ALPINE;
-  if (team.indexOf("Aston")        >= 0) return TEAM_ASTON;
-  if (team.indexOf("Haas")         >= 0) return TEAM_HAAS;
-  if (team.indexOf("Audi")         >= 0) return TEAM_AUDI;
-  if (team.indexOf("Cadillac")     >= 0) return TEAM_CADILLAC;
-  if (team.indexOf("McLaren")      >= 0) return TEAM_MCLAREN;
-  if (team.indexOf("Mercedes")     >= 0) return TEAM_MERCEDES;
-  if (team.indexOf("Racing Bulls") >= 0) return TEAM_RACINGBULLS;
-  if (team.indexOf("Red Bull")     >= 0) return TEAM_REDBULL;
-  if (team.indexOf("Williams")     >= 0) return TEAM_WILLIAMS;
+  team.toLowerCase();
+  team.trim();
+
+  if (team.indexOf("ferrari") >= 0)       return TEAM_FERRARI;
+  if (team.indexOf("alpine") >= 0)        return TEAM_ALPINE;
+  if (team.indexOf("aston") >= 0)         return TEAM_ASTON;
+  if (team.indexOf("haas") >= 0)          return TEAM_HAAS;
+  if (team.indexOf("audi") >= 0)          return TEAM_AUDI;
+  if (team.indexOf("cadillac") >= 0)      return TEAM_CADILLAC;
+  if (team.indexOf("mclaren") >= 0)       return TEAM_MCLAREN;
+  if (team.indexOf("mercedes") >= 0)      return TEAM_MERCEDES;
+  if (team.indexOf("racing bulls") >= 0)  return TEAM_RACINGBULLS;
+  if (team.indexOf("red bull") >= 0)      return TEAM_REDBULL;
+  if (team.indexOf("redbull") >= 0)       return TEAM_REDBULL;
+  if (team.indexOf("williams") >= 0)      return TEAM_WILLIAMS;
+
   return 0;
 }
