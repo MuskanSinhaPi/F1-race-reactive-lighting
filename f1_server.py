@@ -233,7 +233,7 @@ def fetch_driver_standings() -> dict:
                 "driver_name": f"{d['givenName']} {d['familyName']}",
                 "constructor": norm(cons[0].get("name", "") if cons else ""),
                 "points":      float(s["points"]),
-                "position":    int(s["position"]),
+                "position": int(s.get("position", 0)),
             })
         return {"round": rnd, "standings": standings}
     except Exception as e:
