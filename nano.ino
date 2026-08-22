@@ -74,10 +74,7 @@ void loop() {
 
   // Commands from NodeMCU
   if (espSerial.available()) {
-    String msg = espSerial.readStringUntil('\n');
-    msg.trim();
-    if (msg.length() == 0) return;
-    int cmd = msg.toInt();
+    int cmd = espSerial.read();   // raw byte, 0-255, no parsing/toInt() involved
     Serial.print("CMD: ");
     Serial.println(cmd);
     handleCommand(cmd);
@@ -105,6 +102,7 @@ void loop() {
 // ==========================================================
 
 void handleCommand(int cmd) {
+  if (cmd < 0 || cmd > 255) return;   // read() error sentinel or garbage
 
   if (cmd == CMD_CHECKERED) {
     pulsing = false;
@@ -122,6 +120,9 @@ void handleCommand(int cmd) {
   }
 
   if (cmd == CMD_PULSE) {
+    pulseFactor = 0.3;
+    pulseRising = true;
+    lastPulse = millis();
     pulsing = true;
     return;
   }
@@ -227,14 +228,19 @@ void smoothFade(int tr, int tg, int tb) {
 
 void doPulse() {
   if (pulseRising) {
-    pulseFactor += 0.02;
-    if (pulseFactor >= 1.0) pulseRising = false;
+    pulseFactor += 0.01;
+    if (pulseFactor >= 1.0) {
+      pulseFactor = 1.0;
+      pulseRising = false;
+    }
   } else {
-    pulseFactor -= 0.02;
-    if (pulseFactor <= 0.3) pulseRising = true;
+    pulseFactor -= 0.01;
+    if (pulseFactor <= 0.3) {
+      pulseFactor = 0.3;
+      pulseRising = true;
+    }
   }
 
-  // Set all pixels to base team colour at current pulse brightness
   for (int i = 0; i < NUM_LEDS; i++) {
     strip.setPixelColor(i, strip.Color(
       pulseR * pulseFactor,
@@ -242,8 +248,6 @@ void doPulse() {
       pulseB * pulseFactor));
   }
 
-  // Re-apply accent pixels at their own colour, pulsed at the same factor
-  // This preserves e.g. Red Bull red flashes, Haas red dots, Cadillac blue dots
   for (int i = 0; i < numAccentPixels; i++) {
     strip.setPixelColor(accentPixels[i].index, strip.Color(
       accentPixels[i].r * pulseFactor,
