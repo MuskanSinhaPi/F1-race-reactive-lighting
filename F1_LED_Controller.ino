@@ -1917,7 +1917,8 @@ void maintainWiFi() {
 
 void sendToNano(int cmd) {
   if (!nanoReady) return;
-  nanoSerial.print(cmd); nanoSerial.print('\n');
+  if (cmd < 0 || cmd > 255) return;
+  nanoSerial.write((uint8_t)cmd);
   Serial.printf("-> Nano: %d\n", cmd);
 }
 
